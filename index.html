@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Route Studio</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">Route&nbsp;Studio</div>
+  <input id="project-name" type="text" value="My Journey" aria-label="Project name">
+  <div class="spacer"></div>
+  <span id="status" role="status"></span>
+  <button id="btn-save" class="ghost">Save</button>
+  <div class="menu">
+    <button id="btn-export" class="primary">Export ▾</button>
+    <div id="export-menu" class="menu-body" hidden>
+      <button data-export="html">Shareable map (HTML)</button>
+      <button data-export="geojson">Route line (GeoJSON)</button>
+      <button data-export="gpx">Route line (GPX)</button>
+      <hr>
+      <button data-export="project">Project file (backup)</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <aside id="panel">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="rides" role="tab">Rides</button>
+      <button class="tab" data-tab="transfers" role="tab">Transfers</button>
+      <button class="tab" data-tab="animate" role="tab">Animate</button>
+      <button class="tab" data-tab="settings" role="tab">Settings</button>
+    </nav>
+
+    <!-- Rides -->
+    <section class="tab-body active" data-body="rides">
+      <div id="dropzone">
+        <strong>Drop GPX files here</strong>
+        <span>or</span>
+        <button id="btn-pick" class="ghost">Choose files</button>
+        <input id="file-input" type="file" accept=".gpx,.GPX" multiple hidden>
+      </div>
+
+      <details id="rwgps-box">
+        <summary>Sync from Ride with GPS</summary>
+        <p class="hint">
+          Your keys stay in this browser and are sent only to ridewithgps.com.
+          Get them at <span class="mono">ridewithgps.com/settings/developers</span>.
+        </p>
+        <label>API key <input id="rw-key" type="password" autocomplete="off"></label>
+        <label>Auth token <input id="rw-token" type="password" autocomplete="off"></label>
+        <label>User ID <input id="rw-user" type="text" inputmode="numeric" placeholder="optional"></label>
+        <div class="row">
+          <button id="btn-rw-sync" class="primary">Fetch rides</button>
+          <button id="btn-rw-forget" class="ghost">Forget keys</button>
+        </div>
+        <div id="rw-progress" class="hint"></div>
+      </details>
+
+      <div class="list-head">
+        <span id="rides-count">No rides yet</span>
+        <button id="btn-clear-rides" class="link">Remove all</button>
+      </div>
+      <ul id="rides-list" class="list"></ul>
+    </section>
+
+    <!-- Transfers -->
+    <section class="tab-body" data-body="transfers">
+      <p class="hint">
+        Ferries, trains and buses leave gaps between rides. Draw them here and
+        they join your route into one continuous line.
+      </p>
+
+      <div class="modes" id="mode-picker"></div>
+      <label>Name this leg
+        <input id="transfer-label" type="text" placeholder="optional, e.g. Cork → Roscoff">
+      </label>
+
+      <button id="btn-draw" class="primary wide">Start drawing</button>
+      <p class="hint" id="draw-hint" hidden>
+        Click along the route on the map. Double-click to finish the line.
+      </p>
+
+      <div class="list-head">
+        <span id="transfers-count">No transfers yet</span>
+        <button id="btn-clear-transfers" class="link">Remove all</button>
+      </div>
+      <ul id="transfers-list" class="list"></ul>
+
+      <div id="join-report" class="report"></div>
+    </section>
+
+    <!-- Animate -->
+    <section class="tab-body" data-body="animate">
+      <p class="hint">Plays a dot along the joined route, in order of travel.</p>
+      <div class="row">
+        <button id="btn-play" class="primary">▶ Play</button>
+        <button id="btn-restart" class="ghost">↺ Restart</button>
+      </div>
+      <label>Speed <span id="speed-val" class="mono">1×</span>
+        <input id="speed" type="range" min="0.25" max="8" step="0.25" value="1">
+      </label>
+      <label>Trail
+        <select id="trail">
+          <option value="full">Show whole route, dot moves</option>
+          <option value="draw" selected>Draw the route as it goes</option>
+        </select>
+      </label>
+      <label><input id="follow" type="checkbox"> Keep the dot centred</label>
+      <div id="anim-readout" class="report"></div>
+    </section>
+
+    <!-- Settings -->
+    <section class="tab-body" data-body="settings">
+      <label>Map style
+        <select id="basemap">
+          <option value="dark" selected>Dark</option>
+          <option value="light">Light</option>
+          <option value="terrain">Terrain</option>
+        </select>
+      </label>
+      <label>Route colour <input id="brand" type="color" value="#FF6B35"></label>
+      <label>Simplify (metres) <span id="simplify-val" class="mono">10</span>
+        <input id="simplify" type="range" min="0" max="50" step="1" value="10">
+        <span class="hint">Smaller files, coarser line. No point moves further than this.</span>
+      </label>
+      <label>Join tolerance (km) <span id="tol-val" class="mono">25</span>
+        <input id="tol" type="range" min="1" max="100" step="1" value="25">
+        <span class="hint">How close two line ends must be to count as joined.</span>
+      </label>
+      <hr>
+      <button id="btn-import" class="ghost wide">Load a project file…</button>
+      <input id="import-input" type="file" accept=".json" hidden>
+      <button id="btn-reset" class="danger wide">Delete everything</button>
+      <p class="hint">
+        Everything lives in this browser only — nothing is uploaded. Clearing your
+        browser data will remove it, so export a project file to keep a backup.
+      </p>
+    </section>
+  </aside>
+
+  <div id="map-wrap">
+    <div id="map"></div>
+    <div id="scrubber" hidden>
+      <button id="btn-play-2" class="round">▶</button>
+      <input id="progress" type="range" min="0" max="1000" value="0">
+      <span id="progress-label" class="mono">—</span>
+    </div>
+  </div>
+</main>
+
+<div id="toast" hidden></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
