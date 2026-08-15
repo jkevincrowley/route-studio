@@ -33,11 +33,16 @@ Drag `.gpx` files onto the window. Most apps export them: Ride with GPS
 (*ride → Export → GPX Track*), Strava (*⋯ → Export GPX*), Garmin Connect,
 Komoot, Wahoo.
 
-Or open **Sync from Ride with GPS** and paste an API key and auth token from
+Or open **Sync from Ride with GPS**, set an optional date range, and paste an
+API key and auth token from
 [ridewithgps.com/settings/developers](https://ridewithgps.com/settings/developers).
 Those calls go straight from your browser to ridewithgps.com — their API allows
 it — so no server sees your keys. They're kept in this browser's local storage
 and **Forget keys** removes them.
+
+The date range filters *before* anything is downloaded, so a narrow window
+syncs in seconds rather than fetching your whole account. Leave both blank for
+everything.
 
 Rides are ordered by the timestamp inside each file. A file with no timestamps
 falls back to its modification date, which can put it out of order; the app says
@@ -80,6 +85,8 @@ map of a whole country can show. Ramer–Douglas–Peucker at this tolerance
 guarantees no point moves further than the value you set. On a real 208,000-point
 journey, 10 m keeps about a quarter of the points and cuts the page from 4.4 MB
 to 1.2 MB with no visible change. Set `0` to keep every point.
+
+**Map style** — dark, light or terrain, switched live.
 
 **Join tolerance (km)** — how close two line ends must be to count as joined.
 Raise it if a transfer you drew doesn't merge its runs; lower it if separate
@@ -138,6 +145,12 @@ Notable pieces, all in `app.js`:
   dot teleports across an undrawn gap instead of implying travel.
 - **`shareableHTML`** — serialises the current project into a standalone page
   carrying its own copy of the animation.
+
+On performance: the animated path gets its own, coarser point budget
+(`MAX_ANIM_POINTS`) than the static map, and the dot and trail layers are
+created once and updated in place. Together those took a 208,000-point journey
+from 18 fps to comfortably past the display refresh rate — the map itself keeps
+full detail.
 
 ---
 

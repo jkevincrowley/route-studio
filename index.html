@@ -55,6 +55,16 @@
         <label>API key <input id="rw-key" type="password" autocomplete="off"></label>
         <label>Auth token <input id="rw-token" type="password" autocomplete="off"></label>
         <label>User ID <input id="rw-user" type="text" inputmode="numeric" placeholder="optional"></label>
+
+        <div class="dates">
+          <label>Rides from <input id="rw-from" type="date"></label>
+          <label>up to <input id="rw-to" type="date"></label>
+        </div>
+        <p class="hint">
+          Leave both blank for everything. Only rides in range are downloaded,
+          so a narrow window syncs much faster.
+        </p>
+
         <div class="row">
           <button id="btn-rw-sync" class="primary">Fetch rides</button>
           <button id="btn-rw-forget" class="ghost">Forget keys</button>

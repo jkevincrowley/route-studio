@@ -208,12 +208,35 @@ async function rwSync() {
     for (let offset = 0; ; offset += 100) {
       const page = await rwFetch(`/users/${userId}/trips.json`, { offset, limit: 100 });
       const batch = page.results || [];
-      trips.push(...batch);
+      for (const b of batch) trips.push(b);
       if (batch.length < 100) break;
     }
 
+    // Filter by date *before* fetching tracks — each ride is its own request,
+    // so a narrow window turns hundreds of calls into a handful.
+    const from = $('#rw-from').value, to = $('#rw-to').value;
+    const fromMs = from ? Date.parse(from + 'T00:00:00Z') : -Infinity;
+    // "up to" is inclusive of the whole day, so run to the end of it.
+    const toMs = to ? Date.parse(to + 'T00:00:00Z') + 86400000 - 1 : Infinity;
+    if (from && to && fromMs > toMs) {
+      throw new Error('The "from" date is after the "up to" date');
+    }
+
     const known = new Set(state.rides.map(r => r.srcId).filter(Boolean));
-    const todo = trips.filter(t => t.departed_at && !known.has('rw' + t.id));
+    const dated = trips.filter(t => t.departed_at);
+    const inRange = dated.filter(t => {
+      const ms = Date.parse(t.departed_at);
+      return ms >= fromMs && ms <= toMs;
+    });
+    const todo = inRange.filter(t => !known.has('rw' + t.id));
+
+    // Not named `window` — that shadows the global inside this function.
+    const rangeText = (from || to)
+      ? ` between ${from || 'the start'} and ${to || 'now'}` : '';
+    if (!inRange.length) {
+      throw new Error(`No rides found${rangeText} — ${dated.length} exist on the account`);
+    }
+    const outOfRange = dated.length - inRange.length;
     let n = 0;
 
     for (const t of todo) {
@@ -232,10 +255,13 @@ async function rwSync() {
     }
 
     sortRides();
-    localStorage.setItem('rw', JSON.stringify({ key, tok, user: userId }));
+    localStorage.setItem('rw', JSON.stringify({ key, tok, user: userId, from, to }));
     prog.textContent = '';
-    toast(todo.length ? `Added ${todo.length} ride(s) from Ride with GPS`
-                      : 'Already up to date — no new rides');
+    let msg = todo.length
+      ? `Added ${todo.length} ride${todo.length === 1 ? '' : 's'} from Ride with GPS`
+      : `Already up to date — no new rides${rangeText}`;
+    if (outOfRange) msg += `; ${outOfRange} outside the date range were skipped`;
+    toast(msg);
     refreshAll();
     await persist();
   } catch (e) {
@@ -371,7 +397,7 @@ function drawTransfers() {
 function fitAll() {
   const all = [];
   state.rides.forEach(r => all.push(r.points[0], r.points[r.points.length - 1]));
-  state.transfers.forEach(t => all.push(...t.points));
+  state.transfers.forEach(t => { for (const p of t.points) all.push(p); });
   if (all.length) map.fitBounds(L.latLngBounds(all).pad(0.08));
 }
 
@@ -426,20 +452,46 @@ function onDrawCreated(e) {
 }
 
 // ── Animation ───────────────────────────────────────────────────────────────
+// The animated line is redrawn every frame, so its point count sets the frame
+// cost. Beyond a few thousand there is nothing more to see — the extra vertices
+// land inside the same pixel — so the path gets its own, coarser budget than the
+// static map. This is what keeps a 200k-point journey at 60fps.
+const MAX_ANIM_POINTS = 6000;
+
 function prepareAnim() {
   // One sequence across every run, in travel order, remembering where each new
   // run starts. Those boundaries are gaps with no transfer drawn — the dot must
   // jump them, not glide across, or the animation implies travel that never
   // happened (the same reason the map never draws a line there).
-  const pts = [];
-  const breaks = new Set();
-  state.runs.forEach(r => {
-    if (pts.length) breaks.add(pts.length);
-    pts.push(...simplify(r.points, Math.max(state.settings.simplify, 5)));
-  });
-  anim.path = pts;
-  anim.breaks = breaks;
+  const build = (eps) => {
+    const pts = [];
+    const breaks = new Set();
+    state.runs.forEach(r => {
+      if (pts.length) breaks.add(pts.length);
+      // A loop, not push(...spread): spreading ~50k elements overflows the
+      // stack, and a real season's journey is comfortably past that.
+      const simp = simplify(r.points, eps);
+      for (let i = 0; i < simp.length; i++) pts.push(simp[i]);
+    });
+    return { pts, breaks };
+  };
 
+  let eps = Math.max(state.settings.simplify, 5);
+  let out = build(eps);
+  // Coarsen until the path fits the budget. Doubling converges in a few passes.
+  while (out.pts.length > MAX_ANIM_POINTS && eps < 20000) {
+    eps *= 2;
+    out = build(eps);
+  }
+
+  anim.path = out.pts;
+  anim.breaks = out.breaks;
+  // The reusable layers belong to the old path — drop them.
+  animLayer.clearLayers();
+  anim.dot = null;
+  anim.trails = [];
+
+  const pts = anim.path, breaks = anim.breaks;
   anim.cum = [0];
   let total = 0;
   for (let i = 1; i < pts.length; i++) {
@@ -466,27 +518,46 @@ function atFraction(f) {
 function renderAnim() {
   const at = atFraction(anim.t);
   if (!at) return;
-  animLayer.clearLayers();
+
+  // Layers are created once and updated in place. Rebuilding them every frame meant
+  // allocating and re-projecting the whole line sixty times a second.
+  if (!anim.dot) {
+    anim.dot = L.circleMarker(at.pos, {
+      radius: 7, color: '#fff', weight: 2,
+      fillColor: state.settings.brand, fillOpacity: 1,
+    }).addTo(animLayer);
+    anim.trails = [];
+  }
 
   if ($('#trail').value === 'draw') {
     // Break the trail at run boundaries so it never spans an undrawn gap.
-    const head = anim.path.slice(0, at.idx).concat([at.pos]);
+    const head = anim.path.slice(0, at.idx);
+    head.push(at.pos);
+    const segs = [];
     let seg = [];
     for (let i = 0; i < head.length; i++) {
-      if (anim.breaks.has(i) && seg.length > 1) {
-        L.polyline(seg, { color: state.settings.brand, weight: 4, opacity: .95 }).addTo(animLayer);
-        seg = [];
-      }
+      if (anim.breaks.has(i) && seg.length > 1) { segs.push(seg); seg = []; }
       seg.push(head[i]);
     }
-    if (seg.length > 1) {
-      L.polyline(seg, { color: state.settings.brand, weight: 4, opacity: .95 }).addTo(animLayer);
-    }
+    if (seg.length > 1) segs.push(seg);
+
+    segs.forEach((s, i) => {
+      if (!anim.trails[i]) {
+        anim.trails[i] = L.polyline(s, {
+          color: state.settings.brand, weight: 4, opacity: .95,
+        }).addTo(animLayer);
+      } else {
+        anim.trails[i].setLatLngs(s);
+        anim.trails[i].setStyle({ color: state.settings.brand });
+      }
+    });
+    for (let i = segs.length; i < anim.trails.length; i++) anim.trails[i].setLatLngs([]);
+  } else if (anim.trails) {
+    anim.trails.forEach(t => t.setLatLngs([]));
   }
-  L.circleMarker(at.pos, {
-    radius: 7, color: '#fff', weight: 2,
-    fillColor: state.settings.brand, fillOpacity: 1,
-  }).addTo(animLayer);
+
+  anim.dot.setLatLng(at.pos);
+  anim.dot.setStyle({ fillColor: state.settings.brand });
 
   if ($('#follow').checked) map.panTo(at.pos, { animate: false });
 
@@ -632,7 +703,11 @@ async function restore() {
 
   try {
     const rw = JSON.parse(localStorage.getItem('rw') || 'null');
-    if (rw) { $('#rw-key').value = rw.key; $('#rw-token').value = rw.tok; $('#rw-user').value = rw.user || ''; }
+    if (rw) {
+      $('#rw-key').value = rw.key; $('#rw-token').value = rw.tok;
+      $('#rw-user').value = rw.user || '';
+      $('#rw-from').value = rw.from || ''; $('#rw-to').value = rw.to || '';
+    }
   } catch (e) {}
 }
 
@@ -868,6 +943,7 @@ function wire() {
   $('#btn-rw-forget').onclick = () => {
     localStorage.removeItem('rw');
     $('#rw-key').value = $('#rw-token').value = $('#rw-user').value = '';
+    $('#rw-from').value = $('#rw-to').value = '';
     toast('Keys removed from this browser');
   };
 

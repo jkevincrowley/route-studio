@@ -99,6 +99,14 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 15px 0; }
 
 #rwgps-box { margin-top: 13px; border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 11px; }
 #rwgps-box summary { cursor: pointer; color: var(--text); }
+.dates { display: flex; gap: 8px; }
+.dates label { flex: 1; margin-top: 9px; }
+.dates input[type=date] {
+  display: block; width: 100%; margin-top: 4px; padding: 6px 8px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius); color: var(--text); font: inherit;
+  color-scheme: dark;
+}
 
 /* ── Lists ───────────────────────────────────────────────────────── */
 .list-head {
