@@ -6,7 +6,6 @@ trains and buses that link them, then animate a dot along the whole thing.
 **Everything runs in your browser.** No account, no server, no upload. Your
 rides stay on your machine.
 
-![Rides, transfers, animation and export in one window](docs/screenshot.png)
 
 ---
 
@@ -25,7 +24,7 @@ export, or publish.
 
 ## Use it
 
-Open **[the app](https://YOUR-USERNAME.github.io/route-studio/)** — or clone the
+Open **[the app](https://jkevincrowley.github.io/route-studio/)** — or clone the
 repo and open `index.html`. There is no build step and nothing to install.
 
 ### 1. Add rides
@@ -107,7 +106,7 @@ start at your front door, trim them before publishing.
 ## Running it locally
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/route-studio.git
+git clone https://github.com/jkevincrowley/route-studio.git
 cd route-studio
 open index.html          # or just double-click it
 ```
