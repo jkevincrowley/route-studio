@@ -136,13 +136,20 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 15px 0; }
 }
 .list { list-style: none; margin: 0; padding: 0; }
 .list li {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 8px; border: 1px solid var(--line); border-radius: var(--radius);
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 7px; border: 1px solid var(--line); border-radius: var(--radius);
   margin-bottom: 5px; background: var(--panel-2); font-size: 12px;
 }
 .list li .sw { width: 11px; height: 11px; border-radius: 3px; flex: 0 0 auto; }
-.list li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.list li .meta { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.list li .nm {
+  flex: 1 1 auto; min-width: 0;        /* min-width:0 lets flex actually shrink
+                                          the text rather than the row */
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.list li .meta {
+  color: var(--muted); font-size: 11px; white-space: nowrap;
+  flex: 0 0 auto; font-variant-numeric: tabular-nums;
+}
 .list li .del { background: none; border: 0; color: var(--muted); padding: 0 3px; }
 .list li .del:hover { color: var(--danger); }
 

@@ -108,6 +108,12 @@ function ascentM(pts, thresholdM = 3, window = 5) {
   return gain;
 }
 
+/** ISO date to mm-dd-yy. The list is tight and the year rarely varies. */
+function fmtShortDate(iso) {
+  const d = String(iso).slice(0, 10).split('-');   // yyyy-mm-dd
+  return d.length === 3 ? `${d[1]}-${d[2]}-${d[0].slice(2)}` : String(iso).slice(0, 10);
+}
+
 /** Seconds to "4h 12m" / "48m". */
 function fmtDuration(sec) {
   if (!sec || !isFinite(sec) || sec <= 0) return null;
@@ -916,10 +922,12 @@ function renderRides() {
     li.innerHTML =
       `<span class="sw" style="background:${shade(rideRGB(i, state.rides.length), LINE_DARKEN)};` +
       `box-shadow:0 0 0 2px ${rgba(rideRGB(i, state.rides.length), 0.3)}"></span>` +
-      `<span class="nm" title="${escapeHTML(r.name)}">${escapeHTML(r.name)}</span>` +
-      `<span class="meta">${r.date.slice(0, 10)} · ${fmtKm(r.dist)} km` +
-      (r.ascent > 0 ? ` · ${Math.round(r.ascent).toLocaleString()} m` : '') +
-      (fmtDuration(r.duration) ? ` · ${fmtDuration(r.duration)}` : '') + `</span>` +
+      // Distance, climbing and time were squeezing the name down to a letter
+      // or two. They are all still on the map tooltip and in the ride's own
+      // profile panel, which is where you look when you want them.
+      `<span class="nm" title="${escapeHTML(r.name)} — ${r.date.slice(0, 10)}` +
+      ` · ${fmtKm(r.dist)} km">${escapeHTML(r.name)}</span>` +
+      `<span class="meta">${fmtShortDate(r.date)}</span>` +
       `<button class="del" title="Remove">✕</button>`;
     li.querySelector('.del').onclick = () => {
       state.rides.splice(i, 1); refreshAll(); persist();
