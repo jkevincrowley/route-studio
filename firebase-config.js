@@ -9,6 +9,6 @@
  * sharing is not configured. See README "Publishing".
  */
 window.ROUTE_STUDIO_FIREBASE = {
-  projectId: '',
-  apiKey: '',
+  projectId: 'route-studio-1a777',
+  apiKey: 'AIzaSyBndPlyqlc8jTwrdA_l2hvacgoMW8-lvQs',
 };
