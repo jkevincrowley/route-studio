@@ -513,8 +513,19 @@ function recomputeRuns() {
 }
 
 // ── Map ─────────────────────────────────────────────────────────────────────
+// A 2.4px line against a fingertip is close to unhittable. Leaflet's canvas
+// renderer adds `tolerance` to weight/2 when hit-testing, so the tap target
+// grows without the drawn line changing at all.
+const COARSE_POINTER = typeof matchMedia === 'function' &&
+                       matchMedia('(pointer: coarse)').matches;
+const HIT_TOLERANCE = COARSE_POINTER ? 15 : 5;
+
 function initMap() {
-  map = L.map('map', { preferCanvas: true, zoomControl: true }).setView([46, 6], 5);
+  map = L.map('map', {
+    preferCanvas: true,
+    renderer: L.canvas({ tolerance: HIT_TOLERANCE }),
+    zoomControl: true,
+  }).setView([46, 6], 5);
   setBasemap(state.settings.basemap);
   haloLayer = L.layerGroup().addTo(map);   // below rideLayer: added first
   rideLayer = L.layerGroup().addTo(map);
@@ -1618,6 +1629,16 @@ function highlightRide(ride) {
   ];
 }
 
+/** Is this map point within `px` screen pixels of the ride's line? */
+function nearRide(latlng, ride, px) {
+  const p = map.latLngToLayerPoint(latlng);
+  const pts = simplify(ride.points, Math.max(state.settings.simplify, 25));
+  for (const c of pts) {
+    if (map.latLngToLayerPoint(L.latLng(c[0], c[1])).distanceTo(p) <= px) return true;
+  }
+  return false;
+}
+
 function fitToRide(ride) {
   fitBoundsPadded(L.latLngBounds(simplify(ride.points, state.settings.simplify)));
 }
@@ -1946,9 +1967,12 @@ function wire() {
     if (e.target.id === 'share-modal') $('#share-modal').hidden = true;
   });
 
-  // Clicking the map itself, rather than a ride, drops the selection.
-  map.on('click', () => {
-    if (profile.ride) showJourneyProfile();
+  // Clicking bare map drops the selection. On touch a near-miss is common, so
+  // only treat it as a deselect when the tap was well clear of the chosen ride.
+  map.on('click', (e) => {
+    if (!profile.ride) return;
+    if (COARSE_POINTER && nearRide(e.latlng, profile.ride, HIT_TOLERANCE * 2)) return;
+    showJourneyProfile();
   });
 
   // Elevation profile
