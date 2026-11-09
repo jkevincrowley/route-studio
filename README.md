@@ -88,11 +88,21 @@ to 1.2 MB with no visible change. Set `0` to keep every point.
 
 **Map style** — dark, light or terrain, switched live.
 
-Basemaps come from [OpenFreeMap](https://openfreemap.org) — OpenStreetMap
-vector tiles, MIT-licensed, **no API key and no usage limits**. Dark and light
-are vector styles rendered by MapLibre GL inside Leaflet; terrain is
-OpenTopoMap raster. If MapLibre can't load, the map falls back to plain
-OpenStreetMap raster tiles rather than going blank.
+Nine styles, **every one keyless** — no account, no quota:
+
+| Style | Source | Notes |
+|---|---|---|
+| Dark, Light, Liberty | [OpenFreeMap](https://openfreemap.org) | vector, MIT |
+| Colourful, Muted, Night | [VersaTiles](https://versatiles.org) | vector, open source |
+| Cycling | [CyclOSM](https://www.cyclosm.org/) | bike lanes, surfaces, repair stops |
+| Satellite | [Sentinel-2 cloudless](https://s2maps.eu) by EOX | CC BY-NC-SA 4.0 — **non-commercial** |
+| Terrain | [OpenTopoMap](https://opentopomap.org) | contours |
+
+Vector styles are rendered by MapLibre GL inside Leaflet, so overlays, drawing
+and the animation are unaffected. Several of these providers require credit as
+a licence condition, so the chosen style's attribution shows in the panel as
+well as on the map — keep it if you publish. If MapLibre can't load, the map
+falls back to plain OpenStreetMap raster rather than going blank.
 
 **Join tolerance (km)** — how close two line ends must be to count as joined.
 Raise it if a transfer you drew doesn't merge its runs; lower it if separate

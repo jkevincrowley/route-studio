@@ -16,19 +16,69 @@ const MODES = {
   other: { color: '#B0BEC5', dash: '6,8',  label: 'Other transfer' },
 };
 
-// Basemaps. OpenFreeMap serves OpenStreetMap vector tiles with no API key and
-// no usage limits (MIT, openfreemap.org) — CARTO's free raster tiles start
-// returning an "API key required" image once a quota trips, which is what this
-// replaced. Vector styles are rendered by MapLibre GL inside Leaflet via
-// maplibre-gl-leaflet, so every overlay, the drawing tools and the animation
-// stay exactly as they were.
+// Basemaps — every one keyless, no account, no quota. CARTO's free raster
+// tiles start returning an "API key required" image once a quota trips, which
+// is what this set replaced.
+//
+// Vector styles are rendered by MapLibre GL inside Leaflet via
+// maplibre-gl-leaflet, so overlays, drawing and the animation are unaffected.
+//   OpenFreeMap  (MIT, openfreemap.org)   — dark, light, liberty
+//   VersaTiles   (open source, versatiles.org) — colorful, muted, night
+//   CyclOSM      (open source, cyclosm.org)    — cycling infrastructure
+//   Sentinel-2 cloudless by EOX                — satellite, CC BY-NC-SA 4.0
+//   OpenTopoMap                                — contour terrain
+const OSM_ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
 const BASEMAPS = {
-  dark:    { type: 'vector', style: 'https://tiles.openfreemap.org/styles/dark' },
-  light:   { type: 'vector', style: 'https://tiles.openfreemap.org/styles/positron' },
-  terrain: { type: 'raster', url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
-             attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap (CC-BY-SA)' },
+  dark: {
+    label: 'Dark', type: 'vector',
+    style: 'https://tiles.openfreemap.org/styles/dark',
+    attribution: OSM_ATTRIB + ', tiles by <a href="https://openfreemap.org">OpenFreeMap</a>',
+  },
+  light: {
+    label: 'Light', type: 'vector',
+    style: 'https://tiles.openfreemap.org/styles/positron',
+    attribution: OSM_ATTRIB + ', tiles by <a href="https://openfreemap.org">OpenFreeMap</a>',
+  },
+  liberty: {
+    label: 'Liberty — detailed streets', type: 'vector',
+    style: 'https://tiles.openfreemap.org/styles/liberty',
+    attribution: OSM_ATTRIB + ', tiles by <a href="https://openfreemap.org">OpenFreeMap</a>',
+  },
+  colorful: {
+    label: 'Colourful', type: 'vector',
+    style: 'https://tiles.versatiles.org/assets/styles/colorful/style.json',
+    attribution: OSM_ATTRIB + ', tiles by <a href="https://versatiles.org">VersaTiles</a>',
+  },
+  muted: {
+    label: 'Muted', type: 'vector',
+    style: 'https://tiles.versatiles.org/assets/styles/muted/style.json',
+    attribution: OSM_ATTRIB + ', tiles by <a href="https://versatiles.org">VersaTiles</a>',
+  },
+  night: {
+    label: 'Night', type: 'vector',
+    style: 'https://tiles.versatiles.org/assets/styles/colorful-dark/style.json',
+    attribution: OSM_ATTRIB + ', tiles by <a href="https://versatiles.org">VersaTiles</a>',
+  },
+  cycling: {
+    label: 'Cycling — bike infrastructure', type: 'raster',
+    url: 'https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png',
+    subdomains: 'abc', maxZoom: 18,
+    attribution: OSM_ATTRIB + ', tiles by <a href="https://www.cyclosm.org/">CyclOSM</a>',
+  },
+  satellite: {
+    label: 'Satellite', type: 'raster',
+    url: 'https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg',
+    maxZoom: 18,
+    attribution: 'Sentinel-2 cloudless 2020 by <a href="https://s2maps.eu">EOX</a> (CC BY-NC-SA 4.0)',
+  },
+  terrain: {
+    label: 'Terrain — contours', type: 'raster',
+    url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+    subdomains: 'abc', maxZoom: 17,
+    attribution: OSM_ATTRIB + ', SRTM | &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+  },
 };
-const ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, tiles by <a href="https://openfreemap.org">OpenFreeMap</a>';
 
 // ── State ───────────────────────────────────────────────────────────────────
 const state = {
@@ -412,6 +462,27 @@ function recomputeRuns() {
 }
 
 // ── Map ─────────────────────────────────────────────────────────────────────
+function buildBasemapPicker() {
+  const sel = $('#basemap');
+  sel.innerHTML = '';
+  for (const [key, bm] of Object.entries(BASEMAPS)) {
+    const o = document.createElement('option');
+    o.value = key;
+    o.textContent = bm.label || key;
+    sel.appendChild(o);
+  }
+  sel.value = state.settings.basemap in BASEMAPS ? state.settings.basemap : 'dark';
+  showBasemapCredit(sel.value);
+}
+
+/** Credits are a licence condition for several of these providers, so the
+ *  chosen style's attribution is shown in the panel as well as on the map. */
+function showBasemapCredit(kind) {
+  const bm = BASEMAPS[kind] || BASEMAPS.dark;
+  const el = $('#basemap-credit');
+  if (el) el.innerHTML = bm.attribution || OSM_ATTRIB;
+}
+
 function initMap() {
   map = L.map('map', { preferCanvas: true, zoomControl: true }).setView([46, 6], 5);
   setBasemap(state.settings.basemap);
@@ -423,19 +494,22 @@ function initMap() {
 
 function setBasemap(kind) {
   const bm = BASEMAPS[kind] || BASEMAPS.dark;
+  const attribution = bm.attribution || OSM_ATTRIB;
   if (tileLayer) { map.removeLayer(tileLayer); tileLayer = null; }
 
   if (bm.type === 'vector' && typeof L.maplibreGL === 'function') {
-    tileLayer = L.maplibreGL({ style: bm.style, attribution: ATTRIB }).addTo(map);
+    tileLayer = L.maplibreGL({ style: bm.style, attribution }).addTo(map);
   } else if (bm.type === 'vector') {
     // MapLibre failed to load (offline, blocked CDN) — fall back to plain OSM
     // raster rather than leaving the map blank.
     log_fallback();
     tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: ATTRIB, maxZoom: 19,
+      attribution: OSM_ATTRIB, maxZoom: 19,
     }).addTo(map);
   } else {
-    tileLayer = L.tileLayer(bm.url, { attribution: bm.attribution || ATTRIB, maxZoom: 17 }).addTo(map);
+    const opts = { attribution, maxZoom: bm.maxZoom || 18 };
+    if (bm.subdomains) opts.subdomains = bm.subdomains;
+    tileLayer = L.tileLayer(bm.url, opts).addTo(map);
   }
   if (tileLayer.bringToBack) tileLayer.bringToBack();
 }
@@ -817,13 +891,17 @@ function load(data) {
   state.transfers = data.transfers || [];
   Object.assign(state.settings, data.settings || {});
   $('#project-name').value = state.name;
-  $('#basemap').value = state.settings.basemap;
+  if ($('#basemap').options.length) {
+    $('#basemap').value = state.settings.basemap in BASEMAPS ? state.settings.basemap : 'dark';
+    showBasemapCredit($('#basemap').value);
+  }
   $('#brand').value = state.settings.brand;
   $('#simplify').value = state.settings.simplify;
   $('#simplify-val').textContent = state.settings.simplify;
   $('#tol').value = state.settings.tol;
   $('#tol-val').textContent = state.settings.tol;
-  setBasemap(state.settings.settings || state.settings.basemap);
+  if (!(state.settings.basemap in BASEMAPS)) state.settings.basemap = 'dark';
+  setBasemap(state.settings.basemap);
   refreshAll();
   if (state.rides.length) fitAll();
 }
@@ -932,11 +1010,11 @@ const TILES=${JSON.stringify(BASEMAPS)};
 const map=L.map('map',{preferCanvas:true}).setView([46,6],5);
 const bm=TILES[D.basemap]||TILES.dark;
 if(bm.type==='vector'&&typeof L.maplibreGL==='function'){
-  L.maplibreGL({style:bm.style,attribution:'${ATTRIB}'}).addTo(map);
+  L.maplibreGL({style:bm.style,attribution:bm.attribution}).addTo(map);
 }else if(bm.type==='vector'){
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'${ATTRIB}',maxZoom:19}).addTo(map);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:bm.attribution,maxZoom:19}).addTo(map);
 }else{
-  L.tileLayer(bm.url,{attribution:bm.attribution||'${ATTRIB}',maxZoom:17}).addTo(map);
+  L.tileLayer(bm.url,Object.assign({attribution:bm.attribution,maxZoom:bm.maxZoom||18},bm.subdomains?{subdomains:bm.subdomains}:{})).addTo(map);
 }
 const all=[];
 D.rides.forEach(r=>{L.polyline(r.p,{color:r.c,weight:2.5,opacity:.88})
@@ -1065,7 +1143,12 @@ function wire() {
   $('#progress').oninput = e => { setPlaying(false); anim.t = e.target.value / 1000; renderAnim(); };
 
   // Settings
-  $('#basemap').onchange = e => { state.settings.basemap = e.target.value; setBasemap(e.target.value); persist(); };
+  $('#basemap').onchange = e => {
+    state.settings.basemap = e.target.value;
+    setBasemap(e.target.value);
+    showBasemapCredit(e.target.value);
+    persist();
+  };
   $('#brand').oninput = e => { state.settings.brand = e.target.value; refreshAll(); };
   $('#brand').onchange = persist;
   $('#simplify').oninput = e => {
@@ -1117,6 +1200,7 @@ function wire() {
 // ── Boot ────────────────────────────────────────────────────────────────────
 (async function boot() {
   initMap();
+  buildBasemapPicker();
   wire();
   await restore();
   refreshAll();
