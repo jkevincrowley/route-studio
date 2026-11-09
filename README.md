@@ -88,6 +88,12 @@ to 1.2 MB with no visible change. Set `0` to keep every point.
 
 **Map style** — dark, light or terrain, switched live.
 
+Basemaps come from [OpenFreeMap](https://openfreemap.org) — OpenStreetMap
+vector tiles, MIT-licensed, **no API key and no usage limits**. Dark and light
+are vector styles rendered by MapLibre GL inside Leaflet; terrain is
+OpenTopoMap raster. If MapLibre can't load, the map falls back to plain
+OpenStreetMap raster tiles rather than going blank.
+
 **Join tolerance (km)** — how close two line ends must be to count as joined.
 Raise it if a transfer you drew doesn't merge its runs; lower it if separate
 tours are being stitched together when they shouldn't be. If a transfer matches
@@ -118,8 +124,8 @@ cd route-studio
 open index.html          # or just double-click it
 ```
 
-Leaflet and Leaflet.draw load from unpkg, so the first load needs a connection.
-Everything else is local.
+Leaflet, Leaflet.draw and MapLibre GL load from unpkg, so the first load needs
+a connection. Everything else is local.
 
 To host your own copy, push to GitHub and turn on **Settings → Pages → Deploy
 from a branch → main**.

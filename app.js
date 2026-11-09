@@ -16,12 +16,19 @@ const MODES = {
   other: { color: '#B0BEC5', dash: '6,8',  label: 'Other transfer' },
 };
 
+// Basemaps. OpenFreeMap serves OpenStreetMap vector tiles with no API key and
+// no usage limits (MIT, openfreemap.org) — CARTO's free raster tiles start
+// returning an "API key required" image once a quota trips, which is what this
+// replaced. Vector styles are rendered by MapLibre GL inside Leaflet via
+// maplibre-gl-leaflet, so every overlay, the drawing tools and the animation
+// stay exactly as they were.
 const BASEMAPS = {
-  dark:    'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-  light:   'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-  terrain: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+  dark:    { type: 'vector', style: 'https://tiles.openfreemap.org/styles/dark' },
+  light:   { type: 'vector', style: 'https://tiles.openfreemap.org/styles/positron' },
+  terrain: { type: 'raster', url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+             attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap (CC-BY-SA)' },
 };
-const ATTRIB = '&copy; OpenStreetMap contributors, &copy; CARTO';
+const ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, tiles by <a href="https://openfreemap.org">OpenFreeMap</a>';
 
 // ── State ───────────────────────────────────────────────────────────────────
 const state = {
@@ -347,11 +354,29 @@ function initMap() {
 }
 
 function setBasemap(kind) {
-  if (tileLayer) map.removeLayer(tileLayer);
-  tileLayer = L.tileLayer(BASEMAPS[kind] || BASEMAPS.dark, {
-    attribution: ATTRIB, maxZoom: 18,
-  }).addTo(map);
-  tileLayer.bringToBack();
+  const bm = BASEMAPS[kind] || BASEMAPS.dark;
+  if (tileLayer) { map.removeLayer(tileLayer); tileLayer = null; }
+
+  if (bm.type === 'vector' && typeof L.maplibreGL === 'function') {
+    tileLayer = L.maplibreGL({ style: bm.style, attribution: ATTRIB }).addTo(map);
+  } else if (bm.type === 'vector') {
+    // MapLibre failed to load (offline, blocked CDN) — fall back to plain OSM
+    // raster rather than leaving the map blank.
+    log_fallback();
+    tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: ATTRIB, maxZoom: 19,
+    }).addTo(map);
+  } else {
+    tileLayer = L.tileLayer(bm.url, { attribution: bm.attribution || ATTRIB, maxZoom: 17 }).addTo(map);
+  }
+  if (tileLayer.bringToBack) tileLayer.bringToBack();
+}
+
+let warnedFallback = false;
+function log_fallback() {
+  if (warnedFallback) return;
+  warnedFallback = true;
+  toast('Vector basemap unavailable — using plain OpenStreetMap tiles', true);
 }
 
 /** Blue (earliest) → the brand colour (most recent). */
@@ -801,6 +826,7 @@ function shareableHTML() {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHTML(state.name)}</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
 <style>
  html,body{height:100%;margin:0;background:#0d0d0a;color:#f0ebe3;
    font:14px/1.5 system-ui,sans-serif}
@@ -829,12 +855,21 @@ function shareableHTML() {
 <div id="legend"></div>
 <div id="bar"><button id="pp">▶</button><input id="pr" type="range" min="0" max="1000" value="0"><span id="lbl"></span></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
+<script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"><\/script>
+<script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"><\/script>
 <script>
 const D=${JSON.stringify(payload)};
 const MODES=${JSON.stringify(MODES)};
 const TILES=${JSON.stringify(BASEMAPS)};
 const map=L.map('map',{preferCanvas:true}).setView([46,6],5);
-L.tileLayer(TILES[D.basemap]||TILES.dark,{attribution:'${ATTRIB}',maxZoom:18}).addTo(map);
+const bm=TILES[D.basemap]||TILES.dark;
+if(bm.type==='vector'&&typeof L.maplibreGL==='function'){
+  L.maplibreGL({style:bm.style,attribution:'${ATTRIB}'}).addTo(map);
+}else if(bm.type==='vector'){
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'${ATTRIB}',maxZoom:19}).addTo(map);
+}else{
+  L.tileLayer(bm.url,{attribution:bm.attribution||'${ATTRIB}',maxZoom:17}).addTo(map);
+}
 const all=[];
 D.rides.forEach(r=>{L.polyline(r.p,{color:r.c,weight:2.5,opacity:.88})
   .bindTooltip(r.d+' — '+r.n+' ('+r.km+' km)').addTo(map);all.push(r.p[0],r.p[r.p.length-1]);});
