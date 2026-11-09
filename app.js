@@ -544,6 +544,34 @@ async function forceMercator(url) {
   }
 }
 
+/** Leaflet fits bounds to the whole container, but the profile panel and the
+ *  scrubber float on top of it. Without this the fitted route runs underneath
+ *  them. Returns the space each overlay is covering, in pixels. */
+function mapPadding() {
+  const bottomOf = (sel) => {
+    const el = $(sel);
+    if (!el || el.hidden) return 0;
+    const box = el.getBoundingClientRect();
+    const wrap = $('#map-wrap').getBoundingClientRect();
+    return Math.max(0, wrap.bottom - box.top) + 8;
+  };
+  const bottom = Math.max(bottomOf('#profile'), bottomOf('#scrubber'));
+  const card = $('#viewer-card');
+  const top = (card && !card.hidden) ? card.getBoundingClientRect().height + 20 : 16;
+  return { top, bottom: Math.max(bottom, 16) };
+}
+
+/** fitBounds that keeps the route clear of the floating panels. */
+function fitBoundsPadded(bounds) {
+  if (!bounds || !bounds.isValid || !bounds.isValid()) return;
+  const p = mapPadding();
+  map.fitBounds(bounds, {
+    paddingTopLeft: [16, p.top],
+    paddingBottomRight: [16, p.bottom],
+    animate: false,
+  });
+}
+
 /** Tell Leaflet the container changed size. Cheap, and safe to over-call. */
 function resizeMap() {
   if (!map) return;
@@ -620,10 +648,11 @@ function rgba([r, g, b], alpha) { return `rgba(${r},${g},${b},${alpha})`; }
 /** Kept for the ride list swatches and anything else wanting one colour. */
 function rideColor(i, total) { return shade(rideRGB(i, total), 1); }
 
-// How the track is drawn: a dark core over a wide, soft glow in the same hue.
-const LINE_DARKEN = 0.55;   // core line, relative to the ride's colour
-const HALO_WEIGHT = 9;
-const HALO_ALPHA  = 0.32;
+// The track is a dark core line. The glow is reserved for selection, so a
+// clicked ride stands out against the plain lines around it.
+const LINE_DARKEN        = 0.55;   // core line, relative to the ride's colour
+const SELECT_HALO_WEIGHT = 13;
+const SELECT_HALO_ALPHA  = 0.55;
 
 function drawRides() {
   haloLayer.clearLayers();
@@ -634,14 +663,8 @@ function drawRides() {
     const pts = simplify(ride.points, eps);
     const rgb = rideRGB(i, state.rides.length);
 
-    // Wide, soft, same hue — reads as a glow under the track rather than a
-    // second line, and gives the dark core something to sit against on both
-    // light and dark basemaps.
-    L.polyline(pts, {
-      color: rgba(rgb, HALO_ALPHA), weight: HALO_WEIGHT,
-      lineCap: 'round', lineJoin: 'round', interactive: false,
-    }).addTo(haloLayer);
-
+    // No halo here — it is the selection cue, drawn by highlightRide() for one
+    // ride at a time. On every ride at once it was just visual noise.
     L.polyline(pts, {
       color: shade(rgb, LINE_DARKEN), weight: 2.4, opacity: 1,
       lineCap: 'round', lineJoin: 'round',
@@ -675,7 +698,7 @@ function fitAll() {
   const all = [];
   state.rides.forEach(r => all.push(r.points[0], r.points[r.points.length - 1]));
   state.transfers.forEach(t => { for (const p of t.points) all.push(p); });
-  if (all.length) map.fitBounds(L.latLngBounds(all).pad(0.08));
+  if (all.length) fitBoundsPadded(L.latLngBounds(all));
 }
 
 // ── Drawing transfers ───────────────────────────────────────────────────────
@@ -881,7 +904,7 @@ function renderRides() {
     const li = document.createElement('li');
     li.innerHTML =
       `<span class="sw" style="background:${shade(rideRGB(i, state.rides.length), LINE_DARKEN)};` +
-      `box-shadow:0 0 0 2px ${rgba(rideRGB(i, state.rides.length), 0.35)}"></span>` +
+      `box-shadow:0 0 0 2px ${rgba(rideRGB(i, state.rides.length), 0.3)}"></span>` +
       `<span class="nm" title="${escapeHTML(r.name)}">${escapeHTML(r.name)}</span>` +
       `<span class="meta">${r.date.slice(0, 10)} · ${fmtKm(r.dist)} km` +
       (r.ascent > 0 ? ` · ${Math.round(r.ascent).toLocaleString()} m` : '') +
@@ -1153,7 +1176,6 @@ function shareableHTML() {
     rides: state.rides.map((r, i) => ({
       n: r.name, d: r.date.slice(0, 10), km: +r.dist.toFixed(1),
       c: shade(rideRGB(i, state.rides.length), LINE_DARKEN),
-      h: rgba(rideRGB(i, state.rides.length), HALO_ALPHA),
       p: simplify(r.points, eps).map(([a, o]) => [+a.toFixed(5), +o.toFixed(5)]),
     })),
     transfers: state.transfers.map(t => ({
@@ -1220,9 +1242,6 @@ if(bm.type==='vector'&&typeof L.maplibreGL==='function'){
   L.tileLayer(bm.url,Object.assign({attribution:bm.attribution,maxZoom:bm.maxZoom||18},bm.subdomains?{subdomains:bm.subdomains}:{})).addTo(map);
 }
 const all=[];
-D.rides.forEach(r=>{
-  if(r.h) L.polyline(r.p,{color:r.h,weight:9,lineCap:'round',lineJoin:'round',interactive:false}).addTo(map);
-});
 D.rides.forEach(r=>{L.polyline(r.p,{color:r.c,weight:2.4,opacity:1,lineCap:'round',lineJoin:'round'})
   .bindTooltip(r.d+' — '+r.n+' ('+r.km+' km)').addTo(map);all.push(r.p[0],r.p[r.p.length-1]);});
 const used={};
@@ -1451,6 +1470,8 @@ function showRideProfile(ride) {
   $('#p-title').textContent = ride.name;
   $('#p-back').hidden = state.rides.length < 2;
   openProfile();
+  // After openProfile(), so mapPadding() can measure the panel.
+  fitToRide(ride);
 
 }
 
@@ -1484,38 +1505,53 @@ function syncProfileButton() {
   document.body.classList.toggle('has-scrubber', !$('#scrubber').hidden);
 }
 
-let rideHighlight = null;          // [layers] — the line plus its end caps
+let rideHighlight = null;          // [layers] — glow, line and end caps
 
-/** Pick a ride out of the journey: a halo under its line, and labelled caps
- *  so it is obvious which way it ran and where it began and ended. Without
- *  the caps a highlighted segment is just a brighter line among others. */
+/** Pick one ride out of the journey.
+ *
+ *  The glow is the selection cue — it appears here and nowhere else, so a
+ *  highlighted segment reads instantly against the plain dark lines around it.
+ *  Caps mark where the ride began and ended, which a brighter line alone does
+ *  not convey. Drawing only; the fit is separate so it can happen after the
+ *  profile panel is on screen and its height is known.
+ */
 function highlightRide(ride) {
   clearRideHighlight();
+  const i = state.rides.indexOf(ride);
+  const rgb = rideRGB(i < 0 ? state.rides.length - 1 : i, state.rides.length);
   const pts = simplify(ride.points, state.settings.simplify);
   const a = pts[0], b = pts[pts.length - 1];
 
-  const halo = L.polyline(pts, { color: '#fff', weight: 8, opacity: .35 }).addTo(map);
-  const line = L.polyline(pts, { color: '#fff', weight: 2.5, opacity: .95 }).addTo(map);
-  if (halo.bringToBack) halo.bringToBack();
+  const glow = L.polyline(pts, {
+    color: rgba(rgb, SELECT_HALO_ALPHA), weight: SELECT_HALO_WEIGHT,
+    lineCap: 'round', lineJoin: 'round', interactive: false,
+  }).addTo(haloLayer);
+
+  const line = L.polyline(pts, {
+    color: '#fff', weight: 2.6, opacity: .95,
+    lineCap: 'round', lineJoin: 'round', interactive: false,
+  }).addTo(haloLayer);
 
   const cap = (pt, fill, label) =>
     L.circleMarker(pt, { radius: 7, color: '#15150f', weight: 2,
-                         fillColor: fill, fillOpacity: 1 })
-     .bindTooltip(label, { permanent: false, direction: 'top' })
-     .addTo(map);
+                         fillColor: fill, fillOpacity: 1, interactive: true })
+     .bindTooltip(label, { direction: 'top' })
+     .addTo(haloLayer);
 
   rideHighlight = [
-    halo, line,
+    glow, line,
     cap(a, '#8fbf6f', `Start — ${ride.date.slice(0, 10)}`),
-    cap(b, state.settings.brand, `End — ${fmtKm(ride.dist)} km`),
+    cap(b, shade(rgb, 1.15), `End — ${fmtKm(ride.dist)} km`),
   ];
+}
 
-  map.fitBounds(L.latLngBounds(pts).pad(0.2));
+function fitToRide(ride) {
+  fitBoundsPadded(L.latLngBounds(simplify(ride.points, state.settings.simplify)));
 }
 
 function clearRideHighlight() {
   if (!rideHighlight) return;
-  rideHighlight.forEach(l => map.removeLayer(l));
+  rideHighlight.forEach(l => haloLayer.removeLayer(l));
   rideHighlight = null;
 }
 
@@ -1835,6 +1871,11 @@ function wire() {
   $('#share-close').onclick = () => { $('#share-modal').hidden = true; };
   $('#share-modal').addEventListener('click', e => {
     if (e.target.id === 'share-modal') $('#share-modal').hidden = true;
+  });
+
+  // Clicking the map itself, rather than a ride, drops the selection.
+  map.on('click', () => {
+    if (profile.ride) showJourneyProfile();
   });
 
   // Elevation profile
