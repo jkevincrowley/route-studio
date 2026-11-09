@@ -108,6 +108,19 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 15px 0; }
   color-scheme: dark;
 }
 
+.stats {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+  margin-top: 14px; background: var(--line);
+  border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden;
+}
+.stats div { background: var(--panel-2); padding: 9px 11px; }
+.stats .v { font-size: 17px; font-weight: 600; color: var(--text); line-height: 1.25; }
+.stats .k { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.stats .note {
+  grid-column: 1 / -1; font-size: 11px; color: var(--muted);
+  background: var(--panel-2); padding: 7px 11px;
+}
+
 /* ── Lists ───────────────────────────────────────────────────────── */
 .list-head {
   display: flex; justify-content: space-between; align-items: baseline;

@@ -80,6 +80,9 @@ centred.
 
 ## What the numbers mean
 
+The totals appear as a panel at the top of the **Rides** tab, and on the
+title card of any map you export.
+
 **Distance, climbing and time count the recorded rides only.** Transfers are
 lines you drew across ground covered by ferry, train or bus, so including them
 would inflate every figure with distance nobody pedalled. The Transfers panel

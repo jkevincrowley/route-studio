@@ -827,39 +827,67 @@ function renderRides() {
   renderRideStats();
 }
 
-/** Totals for the Rides tab.
+/** Journey totals.
  *
  *  Distance, climbing and time count the recorded rides only. Transfers are
  *  drawn lines across ground that was covered by ferry, train or bus — adding
  *  them would inflate every figure with distance nobody pedalled.
  */
-function renderRideStats() {
-  const el = $('#rides-count');
-  if (!state.rides.length) { el.textContent = 'No rides yet'; return; }
-
-  const km = state.rides.reduce((a, r) => a + r.dist, 0);
-  const withAsc = state.rides.filter(r => r.ascent > 0);
-  const ascent = withAsc.reduce((a, r) => a + r.ascent, 0);
-  const withDur = state.rides.filter(r => r.duration > 0);
-  const secs = withDur.reduce((a, r) => a + r.duration, 0);
-
-  const bits = [`${state.rides.length} rides`, `${fmtKm(km)} km ridden`];
-  if (ascent > 0) bits.push(`${Math.round(ascent).toLocaleString()} m climbed`);
-  const dur = fmtDuration(secs);
-  if (dur) bits.push(dur + (state.rides.every(r => r.elapsed) ? ' elapsed' : ' moving'));
-  el.textContent = bits.join(' · ');
-
-  // Say so when the figures only cover part of the rides, rather than
-  // quietly reporting a total that is missing files without the data.
-  const gaps = [];
-  if (withAsc.length && withAsc.length < state.rides.length) {
-    gaps.push(`${state.rides.length - withAsc.length} without elevation`);
-  }
-  if (withDur.length && withDur.length < state.rides.length) {
-    gaps.push(`${state.rides.length - withDur.length} without timings`);
-  }
-  el.title = gaps.length ? 'Totals exclude ' + gaps.join(' and ') : '';
+function rideTotals() {
+  const rides = state.rides;
+  const withAsc = rides.filter(r => r.ascent > 0);
+  const withDur = rides.filter(r => r.duration > 0);
+  return {
+    count: rides.length,
+    km: rides.reduce((a, r) => a + r.dist, 0),
+    ascent: withAsc.reduce((a, r) => a + r.ascent, 0),
+    seconds: withDur.reduce((a, r) => a + r.duration, 0),
+    // Moving time only if every ride reports one; a mix would be misleading.
+    elapsed: rides.length > 0 && rides.every(r => r.elapsed),
+    missingAsc: rides.length - withAsc.length,
+    missingDur: rides.length - withDur.length,
+  };
 }
+
+function renderRideStats() {
+  const box = $('#ride-stats');
+  const label = $('#rides-count');
+  if (!state.rides.length) {
+    box.hidden = true;
+    label.textContent = 'No rides yet';
+    return;
+  }
+
+  const s = rideTotals();
+  label.textContent = `${s.count} ride${s.count === 1 ? '' : 's'}`;
+
+  const cells = [
+    [`${fmtKm(s.km)} km`, 'ridden'],
+    [`${s.count}`, s.count === 1 ? 'ride' : 'rides'],
+  ];
+  if (s.ascent > 0) cells.push([`${Math.round(s.ascent).toLocaleString()} m`, 'climbed']);
+  const dur = fmtDuration(s.seconds);
+  if (dur) cells.push([dur, s.elapsed ? 'elapsed' : 'moving time']);
+
+  let html = cells.map(([v, k]) =>
+    `<div><div class="v">${v}</div><div class="k">${k}</div></div>`).join('');
+
+  // Say so when the figures cover only some of the rides, rather than quietly
+  // reporting a total that is missing files without the data.
+  const gaps = [];
+  if (s.missingAsc && s.ascent > 0) gaps.push(`${s.missingAsc} without elevation`);
+  if (s.missingDur && s.seconds > 0) gaps.push(`${s.missingDur} without timings`);
+  if (gaps.length) html += `<div class="note">Excludes ${gaps.join(' and ')}.</div>`;
+  if (state.transfers.length) {
+    const tk = state.transfers.reduce((a, t) => a + pathKm(t.points), 0);
+    html += `<div class="note">Transfers are not counted: ` +
+            `${fmtKm(tk)} km by ferry, train or bus.</div>`;
+  }
+
+  box.innerHTML = html;
+  box.hidden = false;
+}
+
 
 function renderTransfers() {
   const ul = $('#transfers-list');
@@ -1033,8 +1061,18 @@ ${segs}
 /** A single self-contained page: the map, the transfers, and the animation. */
 function shareableHTML() {
   const eps = Math.max(state.settings.simplify, 8);
+  const totals = rideTotals();
   const payload = {
     name: state.name,
+    stats: {
+      rides: totals.count,
+      km: Math.round(totals.km),
+      ascent: Math.round(totals.ascent),
+      dur: fmtDuration(totals.seconds),
+      elapsed: totals.elapsed,
+      transferKm: Math.round(
+        state.transfers.reduce((a, t) => a + pathKm(t.points), 0)),
+    },
     brand: state.settings.brand,
     basemap: state.settings.basemap,
     rides: state.rides.map((r, i) => ({
@@ -1063,7 +1101,8 @@ function shareableHTML() {
    border-left:4px solid ${state.settings.brand};border-radius:8px;padding:9px 15px;
    box-shadow:0 2px 12px rgba(0,0,0,.5)}
  #title h1{margin:0;font-size:17px;letter-spacing:.03em}
- #title small{color:#a19a8f}
+ #title small{color:#a19a8f;display:block}
+ #title #sub2{font-size:11px;opacity:.75}
  #bar{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;z-index:900;
    display:flex;gap:11px;align-items:center;background:rgba(12,12,9,.9);
    border:1px solid #34342e;border-radius:24px;padding:8px 15px;
@@ -1079,7 +1118,7 @@ function shareableHTML() {
  #legend i{width:26px;height:0;border-top:3px dashed;display:block}
 </style></head><body>
 <div id="map"></div>
-<div id="title"><h1>${escapeHTML(state.name)}</h1><small id="sub"></small></div>
+<div id="title"><h1>${escapeHTML(state.name)}</h1><small id="sub"></small><small id="sub2"></small></div>
 <div id="legend"></div>
 <div id="bar"><button id="pp">▶</button><input id="pr" type="range" min="0" max="1000" value="0"><span id="lbl"></span></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
@@ -1125,8 +1164,19 @@ function hav(a,b){const R=6371,r=Math.PI/180,dla=(b[0]-a[0])*r,dlo=(b[1]-a[1])*r
  return 2*R*Math.asin(Math.sqrt(s));}
 /* zero-length across run boundaries: the dot jumps an undrawn gap */
 for(let i=1;i<path.length;i++){if(!brk.has(i))tot+=hav(path[i-1],path[i]);cum.push(tot);}
-document.getElementById('sub').textContent=
-  D.rides.length+' rides · '+Math.round(tot).toLocaleString()+' km';
+/* Ridden figures only. The animated total below includes transfers,
+   which is not what these numbers are for. */
+(function(){
+  const S=D.stats||{};
+  const bits=[S.rides+' rides', (S.km||0).toLocaleString()+' km ridden'];
+  if(S.ascent>0) bits.push(S.ascent.toLocaleString()+' m climbed');
+  if(S.dur) bits.push(S.dur+(S.elapsed?' elapsed':' moving'));
+  document.getElementById('sub').textContent=bits.join(' · ');
+  if(S.transferKm>0){
+    const e=document.getElementById('sub2');
+    if(e) e.textContent='plus '+S.transferKm.toLocaleString()+' km by ferry, train or bus';
+  }
+})();
 let t=0,playing=false,raf,last=0,dot,head;
 function at(f){const g=f*tot;let lo=0,hi=cum.length-1;
  while(lo<hi){const m=(lo+hi)>>1;if(cum[m]<g)lo=m+1;else hi=m;}
