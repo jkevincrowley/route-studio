@@ -78,6 +78,26 @@ centred.
 
 ---
 
+## What the numbers mean
+
+**Distance, climbing and time count the recorded rides only.** Transfers are
+lines you drew across ground covered by ferry, train or bus, so including them
+would inflate every figure with distance nobody pedalled. The Transfers panel
+shows the two separately — ridden kilometres, then transfer kilometres.
+
+**Climbing** is read from the elevation values on the track: `<ele>` in a GPX
+file, or the elevation on each Ride with GPS track point. It is smoothed over a
+short window before positive moves are totalled, because both GPS and
+barometric elevation jitter by a metre or two even at a standstill, and summing
+raw deltas turns a cafe stop into hundreds of phantom metres — in testing, 400 m
+from a stationary trace. Rides whose files carry no elevation are left out of
+the total, and the panel says how many.
+
+**Time** uses Ride with GPS's `duration` field, which is moving time. GPX has no
+equivalent, so for uploaded files it is the elapsed time between the first and
+last stamped point — that includes stops, and the label says which you're
+looking at.
+
 ## Settings worth knowing
 
 **Simplify (metres)** — raw GPS logs a point every few metres, far finer than a

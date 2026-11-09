@@ -76,6 +76,47 @@ function haversineKm(a, b) {
   return 2 * R * Math.asin(Math.sqrt(s));
 }
 
+/** Total climbing, in metres.
+ *
+ *  Both barometric and GPS elevation jitter by a metre or two even at a
+ *  standstill. A bare threshold does not help: an oscillation wider than the
+ *  threshold still accumulates on every swing, which turns a cafe stop into
+ *  hundreds of metres of phantom climbing. So smooth the series first with a
+ *  short moving average, then take positive moves that clear the threshold —
+ *  roughly what a bike computer does.
+ */
+function ascentM(pts, thresholdM = 3, window = 5) {
+  const el = [];
+  for (const p of pts) {
+    const e = p[2];
+    if (e != null && isFinite(e)) el.push(Number(e));
+  }
+  if (el.length < 3) return 0;
+
+  const half = Math.max(1, Math.floor(window / 2));
+  let gain = 0, ref = null;
+  for (let i = 0; i < el.length; i++) {
+    const a = Math.max(0, i - half), b = Math.min(el.length - 1, i + half);
+    let sum = 0;
+    for (let k = a; k <= b; k++) sum += el[k];
+    const e = sum / (b - a + 1);
+
+    if (ref === null) { ref = e; continue; }
+    if (e > ref + thresholdM) { gain += e - ref; ref = e; }
+    else if (e < ref) { ref = e; }
+  }
+  return gain;
+}
+
+/** Seconds to "4h 12m" / "48m". */
+function fmtDuration(sec) {
+  if (!sec || !isFinite(sec) || sec <= 0) return null;
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  if (h && m) return `${h}h ${m}m`;
+  if (h) return `${h}h`;
+  return `${m}m`;
+}
+
 function pathKm(pts) {
   let d = 0;
   for (let i = 1; i < pts.length; i++) d += haversineKm(pts[i - 1], pts[i]);
@@ -115,18 +156,23 @@ function parseGPX(text, fallbackName, fallbackDate) {
   if (doc.querySelector('parsererror')) throw new Error('not valid XML');
 
   const points = [];
-  let when = null;
+  let when = null, lastTime = null;
   for (const pt of doc.querySelectorAll('trkpt')) {
     const lat = parseFloat(pt.getAttribute('lat'));
     const lon = parseFloat(pt.getAttribute('lon'));
     if (!isFinite(lat) || !isFinite(lon)) continue;
-    points.push([lat, lon]);
-    if (!when) {
-      const t = pt.querySelector('time');
-      if (t && t.textContent) {
-        const d = new Date(t.textContent.trim());
-        if (!isNaN(d)) when = d;
-      }
+
+    // Elevation rides along as a third ordinate. Everything that handles
+    // points reads [0] and [1] only, so this is invisible to them, and it
+    // keeps projects saved before this change loadable.
+    const eleEl = pt.querySelector('ele');
+    const ele = eleEl ? parseFloat(eleEl.textContent) : NaN;
+    points.push(isFinite(ele) ? [lat, lon, ele] : [lat, lon]);
+
+    const t = pt.querySelector('time');
+    if (t && t.textContent) {
+      const d = new Date(t.textContent.trim());
+      if (!isNaN(d)) { if (!when) when = d; lastTime = d; }
     }
   }
   // Routes are a fair fallback for files with no recorded track.
@@ -140,12 +186,19 @@ function parseGPX(text, fallbackName, fallbackDate) {
   if (points.length < 2) return null;
 
   const nameEl = doc.querySelector('trk > name') || doc.querySelector('gpx > metadata > name');
+  // GPX has no duration field, so this is elapsed time between the first and
+  // last stamped point — it includes stops, unlike Ride with GPS's figure.
+  const duration = (when && lastTime && lastTime > when)
+    ? (lastTime - when) / 1000 : null;
   return {
     id: uid(),
     name: (nameEl && nameEl.textContent.trim()) || fallbackName,
     date: (when || fallbackDate || new Date()).toISOString(),
     points,
     dist: pathKm(points),
+    ascent: ascentM(points),
+    duration,
+    elapsed: true,          // distinguishes it from a moving-time figure
     noTime: !when,
   };
 }
@@ -255,14 +308,29 @@ async function rwSync() {
       n++;
       prog.textContent = `Fetching ride ${n} of ${todo.length}…`;
       const data = await rwFetch(`/trips/${t.id}.json`);
-      const raw = (data.trip && data.trip.track_points) || [];
-      const points = raw.filter(p => p.y != null && p.x != null).map(p => [p.y, p.x]);
+      const trip = data.trip || {};
+      const raw = trip.track_points || [];
+      // Ride with GPS names elevation "e" on each track point; it rides along
+      // as a third ordinate, same as the GPX path.
+      const points = raw.filter(p => p.y != null && p.x != null)
+                        .map(p => (p.e != null && isFinite(p.e))
+                                  ? [p.y, p.x, Number(p.e)] : [p.y, p.x]);
       if (points.length < 2) continue;
+
+      // Duration comes from the API's own field, as asked. Climbing is
+      // always derived from the elevation values on the track itself, the
+      // same way a GPX file is read — one number, one source.
+      const dur = [trip.duration, t.duration, trip.moving_time]
+                    .find(v => v != null && isFinite(v) && v > 0);
+
       state.rides.push({
         id: uid(), srcId: 'rw' + t.id,
         name: t.name || `Ride ${t.id}`,
         date: new Date(t.departed_at).toISOString(),
         points, dist: pathKm(points),
+        ascent: ascentM(points),
+        duration: dur != null ? Number(dur) : null,
+        elapsed: false,        // this is moving time, not wall clock
       });
     }
 
@@ -379,13 +447,19 @@ function recomputeRuns() {
   state.runs = joinJourney(state.rides, state.transfers, state.settings.tol);
   const unmatched = state.transfers.length -
     state.runs.reduce((n, r) => n + r.bridges.length, 0);
-  const totalKm = state.runs.reduce((s, r) => s + r.km, 0);
 
   const el = $('#join-report');
   if (!state.rides.length) { el.innerHTML = ''; return; }
 
+  const riddenKm = state.rides.reduce((a, r) => a + r.dist, 0);
+  const transferKm = state.runs.reduce((a, r) =>
+    a + r.bridges.reduce((b, t) => b + pathKm(t.points), 0), 0);
+
   let html = `<b>${state.runs.length}</b> continuous run${state.runs.length === 1 ? '' : 's'}` +
-             ` &middot; <b>${fmtKm(totalKm)} km</b>`;
+             ` &middot; <b>${fmtKm(riddenKm)} km</b> ridden`;
+  if (transferKm > 0) {
+    html += ` &middot; ${fmtKm(transferKm)} km by ferry, train or bus`;
+  }
 
   // Name each remaining gap and say what is stopping it joining. A chain of
   // several transfers counts, so "nearly reached" usually means one leg is
@@ -739,7 +813,9 @@ function renderRides() {
     li.innerHTML =
       `<span class="sw" style="background:${rideColor(i, state.rides.length)}"></span>` +
       `<span class="nm" title="${escapeHTML(r.name)}">${escapeHTML(r.name)}</span>` +
-      `<span class="meta">${r.date.slice(0, 10)} · ${fmtKm(r.dist)} km</span>` +
+      `<span class="meta">${r.date.slice(0, 10)} · ${fmtKm(r.dist)} km` +
+      (r.ascent > 0 ? ` · ${Math.round(r.ascent).toLocaleString()} m` : '') +
+      (fmtDuration(r.duration) ? ` · ${fmtDuration(r.duration)}` : '') + `</span>` +
       `<button class="del" title="Remove">✕</button>`;
     li.querySelector('.del').onclick = () => {
       state.rides.splice(i, 1); refreshAll(); persist();
@@ -748,9 +824,41 @@ function renderRides() {
     li.onmouseleave = () => clearHighlight();
     ul.appendChild(li);
   });
-  const km = state.rides.reduce((s, r) => s + r.dist, 0);
-  $('#rides-count').textContent = state.rides.length
-    ? `${state.rides.length} rides · ${fmtKm(km)} km` : 'No rides yet';
+  renderRideStats();
+}
+
+/** Totals for the Rides tab.
+ *
+ *  Distance, climbing and time count the recorded rides only. Transfers are
+ *  drawn lines across ground that was covered by ferry, train or bus — adding
+ *  them would inflate every figure with distance nobody pedalled.
+ */
+function renderRideStats() {
+  const el = $('#rides-count');
+  if (!state.rides.length) { el.textContent = 'No rides yet'; return; }
+
+  const km = state.rides.reduce((a, r) => a + r.dist, 0);
+  const withAsc = state.rides.filter(r => r.ascent > 0);
+  const ascent = withAsc.reduce((a, r) => a + r.ascent, 0);
+  const withDur = state.rides.filter(r => r.duration > 0);
+  const secs = withDur.reduce((a, r) => a + r.duration, 0);
+
+  const bits = [`${state.rides.length} rides`, `${fmtKm(km)} km ridden`];
+  if (ascent > 0) bits.push(`${Math.round(ascent).toLocaleString()} m climbed`);
+  const dur = fmtDuration(secs);
+  if (dur) bits.push(dur + (state.rides.every(r => r.elapsed) ? ' elapsed' : ' moving'));
+  el.textContent = bits.join(' · ');
+
+  // Say so when the figures only cover part of the rides, rather than
+  // quietly reporting a total that is missing files without the data.
+  const gaps = [];
+  if (withAsc.length && withAsc.length < state.rides.length) {
+    gaps.push(`${state.rides.length - withAsc.length} without elevation`);
+  }
+  if (withDur.length && withDur.length < state.rides.length) {
+    gaps.push(`${state.rides.length - withDur.length} without timings`);
+  }
+  el.title = gaps.length ? 'Totals exclude ' + gaps.join(' and ') : '';
 }
 
 function renderTransfers() {
@@ -887,12 +995,18 @@ function runsGeoJSON() {
     features: state.runs.map((r, i) => ({
       type: 'Feature',
       properties: {
-        run: i + 1, points: r.points.length, distance_km: +r.km.toFixed(1),
+        run: i + 1,
+        points: r.points.length,
+        distance_km: +r.km.toFixed(1),            // whole line, transfers included
+        transfer_km: +r.bridges.reduce((a, t) => a + pathKm(t.points), 0).toFixed(1),
         bridged_by: r.bridges.map(b => `${b.mode}: ${b.label}`),
       },
       geometry: {
         type: 'LineString',
-        coordinates: r.points.map(([lat, lon]) => [+lon.toFixed(5), +lat.toFixed(5)]),
+        coordinates: r.points.map(([lat, lon, el]) =>
+          (el != null && isFinite(el))
+            ? [+lon.toFixed(5), +lat.toFixed(5), +el.toFixed(1)]
+            : [+lon.toFixed(5), +lat.toFixed(5)]),
       },
     })),
   };
@@ -902,7 +1016,10 @@ function runsGPX() {
   const esc = escapeHTML;
   const segs = state.runs.map(r =>
     '  <trkseg>\n' +
-    r.points.map(([la, lo]) => `   <trkpt lat="${la.toFixed(6)}" lon="${lo.toFixed(6)}"/>`).join('\n') +
+    r.points.map(([la, lo, el]) =>
+      (el != null && isFinite(el))
+        ? `   <trkpt lat="${la.toFixed(6)}" lon="${lo.toFixed(6)}"><ele>${el.toFixed(1)}</ele></trkpt>`
+        : `   <trkpt lat="${la.toFixed(6)}" lon="${lo.toFixed(6)}"/>`).join('\n') +
     '\n  </trkseg>').join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="Route Studio" xmlns="http://www.topografix.com/GPX/1/1">
