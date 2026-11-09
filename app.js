@@ -417,33 +417,6 @@ function recomputeRuns() {
 }
 
 // ── Map ─────────────────────────────────────────────────────────────────────
-function buildBasemapPicker() {
-  const sel = $('#basemap');
-  const keys = Object.keys(BASEMAPS);
-  sel.innerHTML = '';
-  for (const key of keys) {
-    const o = document.createElement('option');
-    o.value = key;
-    o.textContent = BASEMAPS[key].label || key;
-    sel.appendChild(o);
-  }
-  sel.value = state.settings.basemap in BASEMAPS ? state.settings.basemap : keys[0];
-  // One style means nothing to choose between — hide the control but keep the
-  // credit visible, since attribution is a licence condition.
-  sel.hidden = keys.length < 2;
-  const lbl = sel.closest('label');
-  if (lbl) lbl.firstChild.textContent = keys.length < 2 ? 'Basemap ' : 'Map style ';
-  showBasemapCredit(sel.value);
-}
-
-/** Credit is a licence condition for this provider, so the attribution is
- *  shown in the panel as well as on the map. */
-function showBasemapCredit(kind) {
-  const bm = BASEMAPS[kind] || BASEMAPS[Object.keys(BASEMAPS)[0]];
-  const el = $('#basemap-credit');
-  if (el) el.innerHTML = bm.attribution || OSM_ATTRIB;
-}
-
 function initMap() {
   map = L.map('map', { preferCanvas: true, zoomControl: true }).setView([46, 6], 5);
   setBasemap(state.settings.basemap);
@@ -885,11 +858,6 @@ function load(data) {
   state.transfers = data.transfers || [];
   Object.assign(state.settings, data.settings || {});
   $('#project-name').value = state.name;
-  if ($('#basemap').options.length) {
-    $('#basemap').value = state.settings.basemap in BASEMAPS
-      ? state.settings.basemap : Object.keys(BASEMAPS)[0];
-    showBasemapCredit($('#basemap').value);
-  }
   $('#brand').value = state.settings.brand;
   $('#simplify').value = state.settings.simplify;
   $('#simplify-val').textContent = state.settings.simplify;
@@ -1005,7 +973,7 @@ const D=${JSON.stringify(payload)};
 const MODES=${JSON.stringify(MODES)};
 const TILES=${JSON.stringify(BASEMAPS)};
 const map=L.map('map',{preferCanvas:true}).setView([46,6],5);
-const bm=TILES[D.basemap]||TILES.dark;
+const bm=TILES[D.basemap]||TILES[Object.keys(TILES)[0]];
 if(bm.type==='vector'&&typeof L.maplibreGL==='function'){
   /* strip any globe projection: Leaflet overlays are Web Mercator */
   fetch(bm.style).then(r=>r.json()).then(st=>{
@@ -1146,12 +1114,6 @@ function wire() {
   $('#progress').oninput = e => { setPlaying(false); anim.t = e.target.value / 1000; renderAnim(); };
 
   // Settings
-  $('#basemap').onchange = e => {
-    state.settings.basemap = e.target.value;
-    setBasemap(e.target.value);
-    showBasemapCredit(e.target.value);
-    persist();
-  };
   $('#brand').oninput = e => { state.settings.brand = e.target.value; refreshAll(); };
   $('#brand').onchange = persist;
   $('#simplify').oninput = e => {
@@ -1203,7 +1165,6 @@ function wire() {
 // ── Boot ────────────────────────────────────────────────────────────────────
 (async function boot() {
   initMap();
-  buildBasemapPicker();
   wire();
   await restore();
   refreshAll();

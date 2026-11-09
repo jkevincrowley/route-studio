@@ -98,8 +98,8 @@ under the route lines. The style is fetched and its projection rewritten to
 `mercator` before MapLibre sees it. Anything added later from a vector style
 needs the same treatment — `forceMercator()` in `app.js`.
 
-Attribution is a licence condition, so the credit is shown in the Settings
-panel as well as on the map. Keep it if you publish.
+Attribution is a licence condition, and appears in the map's own corner
+credit. Keep it if you publish.
 
 **Join tolerance (km)** — how close two line ends must be to count as joined.
 Raise it if a transfer you drew doesn't merge its runs; lower it if separate
