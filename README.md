@@ -88,21 +88,18 @@ to 1.2 MB with no visible change. Set `0` to keep every point.
 
 **Map style** — dark, light or terrain, switched live.
 
-Nine styles, **every one keyless** — no account, no quota:
+The basemap is [VersaTiles](https://versatiles.org) *Muted* — OpenStreetMap
+vector tiles, open source, **no API key and no quota**. Rendered by MapLibre GL
+inside Leaflet, so overlays, drawing and the animation are unaffected.
 
-| Style | Source | Notes |
-|---|---|---|
-| Dark, Light, Liberty | [OpenFreeMap](https://openfreemap.org) | vector, MIT |
-| Colourful, Muted, Night | [VersaTiles](https://versatiles.org) | vector, open source |
-| Cycling | [CyclOSM](https://www.cyclosm.org/) | bike lanes, surfaces, repair stops |
-| Satellite | [Sentinel-2 cloudless](https://s2maps.eu) by EOX | CC BY-NC-SA 4.0 — **non-commercial** |
-| Terrain | [OpenTopoMap](https://opentopomap.org) | contours |
+The style ships `projection: {type: "globe"}`, which does not work here:
+Leaflet draws its overlays in Web Mercator, so a globe basemap slides out from
+under the route lines. The style is fetched and its projection rewritten to
+`mercator` before MapLibre sees it. Anything added later from a vector style
+needs the same treatment — `forceMercator()` in `app.js`.
 
-Vector styles are rendered by MapLibre GL inside Leaflet, so overlays, drawing
-and the animation are unaffected. Several of these providers require credit as
-a licence condition, so the chosen style's attribution shows in the panel as
-well as on the map — keep it if you publish. If MapLibre can't load, the map
-falls back to plain OpenStreetMap raster rather than going blank.
+Attribution is a licence condition, so the credit is shown in the Settings
+panel as well as on the map. Keep it if you publish.
 
 **Join tolerance (km)** — how close two line ends must be to count as joined.
 Raise it if a transfer you drew doesn't merge its runs; lower it if separate
