@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Published maps. Anyone may create one and anyone may read it — there are no
+// accounts yet, and the document id is the only secret, which is what makes a
+// link "unlisted". Nothing can be edited or deleted once published, so a link
+// you have shared cannot be altered underneath its readers.
+//
+// The guards below are what stop this being an open write endpoint: a payload
+// has to look like a published map and stay inside Firestore's 1 MiB document
+// ceiling, with room left for the other fields.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /published/{id} {
+      allow read: if true;
+
+      allow create: if request.resource.data.keys().hasOnly(
+                         ['payload', 'name', 'createdAt', 'points', 'ownerId'])
+                    && request.resource.data.keys().hasAll(
+                         ['payload', 'name', 'createdAt'])
+                    && request.resource.data.payload is string
+                    && request.resource.data.payload.size() > 0
+                    && request.resource.data.payload.size() < 900000
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() < 200;
+
+      // Published maps are immutable. When accounts arrive, relax this to
+      // allow the owner through: request.auth.uid == resource.data.ownerId
+      allow update, delete: if false;
+    }
+  }
+}

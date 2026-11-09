@@ -191,3 +191,42 @@ button.round {
   #panel { width: 100%; flex: 0 0 auto; max-height: 46vh; }
   #map-wrap { flex: 1; min-height: 320px; }
 }
+
+/* ── Published-map viewer (?p=…) ─────────────────────────────────── */
+body.viewing #panel { display: none; }
+body.viewing #topbar { display: none; }
+body.viewing main { height: 100%; }
+
+#viewer-card {
+  position: absolute; top: 14px; left: 56px; z-index: 900;
+  background: rgba(12,12,9,.86); border-left: 4px solid var(--brand);
+  border-radius: 8px; padding: 10px 16px; max-width: min(460px, calc(100% - 80px));
+  box-shadow: 0 2px 14px rgba(0,0,0,.5);
+}
+#viewer-card h1 { margin: 0 0 2px; font-size: 17px; letter-spacing: .03em; }
+#viewer-card small { display: block; color: var(--muted); font-size: 12px; }
+#viewer-card #viewer-stats2 { font-size: 11px; opacity: .75; }
+.viewer-link {
+  display: inline-block; margin-top: 7px; font-size: 12px;
+  color: var(--brand); text-decoration: none;
+}
+.viewer-link:hover { text-decoration: underline; }
+
+/* ── Share sheet ─────────────────────────────────────────────────── */
+#share-modal {
+  position: fixed; inset: 0; z-index: 4000; display: grid; place-items: center;
+  background: rgba(0,0,0,.6);
+}
+#share-modal .sheet {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 11px; padding: 20px 22px; width: min(480px, calc(100% - 36px));
+  box-shadow: 0 14px 44px rgba(0,0,0,.6);
+}
+#share-modal h2 { margin: 0 0 7px; font-size: 16px; }
+.share-row { display: flex; gap: 8px; margin-top: 12px; }
+#share-url {
+  flex: 1; padding: 8px 10px; font-size: 12px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius); color: var(--text);
+  font-family: ui-monospace, Menlo, monospace;
+}

@@ -20,7 +20,9 @@
   <div class="menu">
     <button id="btn-export" class="primary">Export ▾</button>
     <div id="export-menu" class="menu-body" hidden>
-      <button data-export="html">Shareable map (HTML)</button>
+      <button data-export="publish">Publish a share link…</button>
+      <hr>
+      <button data-export="html">Shareable map (HTML file)</button>
       <button data-export="geojson">Route line (GeoJSON)</button>
       <button data-export="gpx">Route line (GPX)</button>
       <hr>
@@ -160,12 +162,35 @@
   </div>
 </main>
 
+<div id="viewer-card" hidden>
+  <h1 id="viewer-title"></h1>
+  <small id="viewer-stats"></small>
+  <small id="viewer-stats2"></small>
+  <a id="viewer-open" href="./" class="viewer-link">Make your own →</a>
+</div>
+
+<div id="share-modal" hidden>
+  <div class="sheet">
+    <h2 id="share-title">Published</h2>
+    <p class="hint" id="share-note"></p>
+    <div class="share-row">
+      <input id="share-url" type="text" readonly>
+      <button id="share-copy" class="primary">Copy</button>
+    </div>
+    <div class="row">
+      <button id="share-open" class="ghost">Open it</button>
+      <button id="share-close" class="ghost">Done</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" hidden></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
+<script src="firebase-config.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

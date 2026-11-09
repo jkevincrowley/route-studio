@@ -946,6 +946,10 @@ function idb() {
 }
 
 async function persist() {
+  // Never write while showing somebody else's published map. The viewer loads
+  // their project into `state`, so saving here would silently replace your own.
+  if (typeof document !== 'undefined' &&
+      document.body && document.body.classList.contains('viewing')) return;
   try {
     const db = await idb();
     await new Promise((res, rej) => {
@@ -1206,6 +1210,7 @@ render();
 }
 
 function doExport(kind) {
+  if (kind === 'publish') { publish(); return; }
   const safe = state.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'journey';
   if (!state.rides.length && kind !== 'project') { toast('Add some rides first', true); return; }
   if (kind === 'geojson') download(safe + '-route.geojson', JSON.stringify(runsGeoJSON()), 'application/geo+json');
@@ -1217,6 +1222,204 @@ function doExport(kind) {
     return;
   }
   toast('Exported ' + kind);
+}
+
+
+// ── Publishing ──────────────────────────────────────────────────────────────
+// A published map is one Firestore document: the project, gzipped and
+// base64'd, under the 1 MiB document ceiling. No SDK — the REST API is two
+// fetches, and avoids shipping ~200 KB of client library for them.
+//
+// The document id is the only secret, which is what makes a link unlisted.
+// Published maps are immutable (see firestore.rules), so a link you have given
+// out cannot change underneath whoever you gave it to.
+
+const FB = (typeof window !== 'undefined' && window.ROUTE_STUDIO_FIREBASE) || {};
+const FIRESTORE_MAX = 1048576;          // hard Firestore document limit
+const PUBLISH_BUDGET = 900000;          // leave room for the other fields
+
+function publishConfigured() { return !!(FB.projectId && FB.apiKey); }
+
+function fbBase() {
+  return `https://firestore.googleapis.com/v1/projects/${FB.projectId}` +
+         `/databases/(default)/documents/published`;
+}
+/** GET one published map. */
+function fbReadUrl(id) {
+  return `${fbBase()}/${encodeURIComponent(id)}?key=${encodeURIComponent(FB.apiKey)}`;
+}
+/** POST a new one at a chosen id. Firestore takes the id as a query param. */
+function fbCreateUrl(id) {
+  return `${fbBase()}?documentId=${encodeURIComponent(id)}&key=${encodeURIComponent(FB.apiKey)}`;
+}
+
+/** Unguessable, URL-safe, no lookalike characters. */
+function shareId(len = 12) {
+  const alphabet = '23456789abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ';
+  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  return Array.from(bytes, b => alphabet[b % alphabet.length]).join('');
+}
+
+async function gzipToBase64(text) {
+  const stream = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
+  const buf = new Uint8Array(await new Response(stream).arrayBuffer());
+  // btoa chokes on very long argument lists, so feed it in chunks.
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+async function base64ToText(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+}
+
+/** The project as published: simplified for viewing, full fidelity dropped.
+ *  Viewers get a map, not a data archive — and the payload has to fit. */
+function publishPayload(simplifyM) {
+  const eps = Math.max(state.settings.simplify, simplifyM);
+  const totals = rideTotals();
+  return {
+    v: 1,
+    name: state.name,
+    settings: { brand: state.settings.brand, basemap: state.settings.basemap,
+                simplify: state.settings.simplify, tol: state.settings.tol },
+    stats: {
+      rides: totals.count, km: Math.round(totals.km),
+      ascent: Math.round(totals.ascent), dur: fmtDuration(totals.seconds),
+      elapsed: totals.elapsed,
+      transferKm: Math.round(state.transfers.reduce((a, t) => a + pathKm(t.points), 0)),
+    },
+    rides: state.rides.map(r => ({
+      id: r.id, name: r.name, date: r.date, dist: r.dist,
+      ascent: r.ascent || 0, duration: r.duration || null, elapsed: !!r.elapsed,
+      points: simplify(r.points, eps).map(p =>
+        p.length > 2 ? [+p[0].toFixed(5), +p[1].toFixed(5), +p[2].toFixed(1)]
+                     : [+p[0].toFixed(5), +p[1].toFixed(5)]),
+    })),
+    transfers: state.transfers.map(t => ({
+      id: t.id, mode: t.mode, label: t.label,
+      points: t.points.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]),
+    })),
+  };
+}
+
+async function publish() {
+  if (!state.rides.length) { toast('Add some rides first', true); return; }
+  if (typeof CompressionStream === 'undefined') {
+    toast('This browser cannot compress — try Chrome, Edge, Safari 16.4+ or Firefox 113+', true);
+    return;
+  }
+  if (!publishConfigured()) {
+    toast('Sharing is not configured — see "Publishing" in the README', true);
+    return;
+  }
+
+  status('Preparing…');
+  try {
+    // Coarsen until it fits. 10 m is already invisible at map zoom; the later
+    // steps only matter for journeys several times the size of a season.
+    let payload = null, b64 = null;
+    for (const eps of [10, 15, 20, 30, 50, 80]) {
+      payload = publishPayload(eps);
+      b64 = await gzipToBase64(JSON.stringify(payload));
+      if (b64.length <= PUBLISH_BUDGET) break;
+    }
+    if (b64.length > PUBLISH_BUDGET) {
+      toast(`Too large to publish (${(b64.length / 1048576).toFixed(1)} MB after ` +
+            `compression; the limit is 1 MB). Remove some rides and try again.`, true);
+      status('');
+      return;
+    }
+
+    status('Publishing…');
+    const id = shareId();
+    const res = await fetch(fbCreateUrl(id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: {
+        payload:   { stringValue: b64 },
+        name:      { stringValue: state.name.slice(0, 199) },
+        createdAt: { timestampValue: new Date().toISOString() },
+        points:    { integerValue: String(payload.rides.reduce((a, r) => a + r.points.length, 0)) },
+      }}),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(res.status === 403
+        ? 'Firestore refused the write — check firestore.rules is deployed'
+        : `Firestore returned HTTP ${res.status}: ${body.slice(0, 160)}`);
+    }
+
+    status('');
+    showShareLink(id, b64.length);
+  } catch (e) {
+    status('');
+    toast('Could not publish: ' + e.message, true);
+  }
+}
+
+function shareUrlFor(id) {
+  const base = location.origin + location.pathname.replace(/[^/]*$/, '');
+  return `${base}?p=${id}`;
+}
+
+function showShareLink(id, bytes) {
+  const url = shareUrlFor(id);
+  $('#share-url').value = url;
+  $('#share-note').textContent =
+    `Anyone with this link can view the map. It cannot be edited once published, ` +
+    `and it is not listed anywhere — the link is the only way in. ` +
+    `(${(bytes / 1024).toFixed(0)} KB)`;
+  $('#share-modal').hidden = false;
+  $('#share-url').select();
+}
+
+/** Load a published map into the viewer. */
+async function openPublished(id) {
+  document.body.classList.add('viewing');
+  status('Loading…');
+  try {
+    if (!publishConfigured()) throw new Error('sharing is not configured on this copy');
+    const res = await fetch(fbReadUrl(id));
+    if (res.status === 404) throw new Error('that link does not exist, or was removed');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const doc = await res.json();
+    const b64 = doc.fields && doc.fields.payload && doc.fields.payload.stringValue;
+    if (!b64) throw new Error('that link has no map on it');
+
+    const data = JSON.parse(await base64ToText(b64));
+    state.name = data.name || 'Shared journey';
+    state.rides = (data.rides || []).map(r => ({ ...r, points: r.points }));
+    state.transfers = data.transfers || [];
+    Object.assign(state.settings, data.settings || {});
+
+    refreshAll();
+    fitAll();
+
+    const S = data.stats || {};
+    $('#viewer-title').textContent = state.name;
+    const bits = [`${S.rides || state.rides.length} rides`];
+    if (S.km) bits.push(`${S.km.toLocaleString()} km ridden`);
+    if (S.ascent > 0) bits.push(`${S.ascent.toLocaleString()} m climbed`);
+    if (S.dur) bits.push(S.dur + (S.elapsed ? ' elapsed' : ' moving'));
+    $('#viewer-stats').textContent = bits.join(' · ');
+    $('#viewer-stats2').textContent = S.transferKm > 0
+      ? `plus ${S.transferKm.toLocaleString()} km by ferry, train or bus` : '';
+    $('#viewer-card').hidden = false;
+    $('#scrubber').hidden = anim.path.length < 2;
+    status('');
+  } catch (e) {
+    status('');
+    document.body.classList.remove('viewing');
+    toast('Could not open that link: ' + e.message, true);
+  }
 }
 
 // ── Wiring ──────────────────────────────────────────────────────────────────
@@ -1319,6 +1522,23 @@ function wire() {
     toast('Cleared');
   };
 
+  // Share sheet
+  $('#share-copy').onclick = async () => {
+    const url = $('#share-url').value;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Link copied');
+    } catch (e) {
+      $('#share-url').select();          // clipboard blocked — let them copy by hand
+      toast('Press ⌘C / Ctrl+C to copy', true);
+    }
+  };
+  $('#share-open').onclick = () => window.open($('#share-url').value, '_blank');
+  $('#share-close').onclick = () => { $('#share-modal').hidden = true; };
+  $('#share-modal').addEventListener('click', e => {
+    if (e.target.id === 'share-modal') $('#share-modal').hidden = true;
+  });
+
   // Export menu
   const menu = $('#export-menu');
   $('#btn-export').onclick = e => { e.stopPropagation(); menu.hidden = !menu.hidden; };
@@ -1333,6 +1553,16 @@ function wire() {
 (async function boot() {
   initMap();
   wire();
+
+  // A ?p= link is somebody else's map: show it read-only and never touch the
+  // local project, so opening a shared link cannot overwrite your own work.
+  const shared = new URLSearchParams(location.search).get('p');
+  if (shared) {
+    $('#viewer-open').href = location.pathname;
+    await openPublished(shared);
+    return;
+  }
+
   await restore();
   refreshAll();
   if (state.rides.length) fitAll();
