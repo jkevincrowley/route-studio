@@ -45,7 +45,7 @@ const state = {
 };
 
 let map, tileLayer;
-let rideLayer, transferLayer, markerLayer, animLayer;
+let haloLayer, rideLayer, transferLayer, markerLayer, animLayer;
 let drawHandler = null, drawMode = 'ferry';
 const anim = { raf: null, playing: false, t: 0, dot: null, trail: null, path: [], cum: [], total: 0 };
 
@@ -516,6 +516,7 @@ function recomputeRuns() {
 function initMap() {
   map = L.map('map', { preferCanvas: true, zoomControl: true }).setView([46, 6], 5);
   setBasemap(state.settings.basemap);
+  haloLayer = L.layerGroup().addTo(map);   // below rideLayer: added first
   rideLayer = L.layerGroup().addTo(map);
   transferLayer = L.layerGroup().addTo(map);
   markerLayer = L.layerGroup().addTo(map);
@@ -591,24 +592,60 @@ function log_fallback() {
 }
 
 /** Blue (earliest) → the brand colour (most recent). */
-function rideColor(i, total) {
+/** The ride's own colour as [r, g, b], blue at the start of the journey
+ *  shifting to the chosen brand colour by the most recent ride. */
+function rideRGB(i, total) {
   const hex = state.settings.brand.replace('#', '');
-  const br = parseInt(hex.slice(0, 2), 16), bg = parseInt(hex.slice(2, 4), 16), bb = parseInt(hex.slice(4, 6), 16);
+  const br = parseInt(hex.slice(0, 2), 16),
+        bg = parseInt(hex.slice(2, 4), 16),
+        bb = parseInt(hex.slice(4, 6), 16);
   const f = total < 2 ? 1 : i / (total - 1);
-  const r = Math.round(64 + (br - 64) * f), g = Math.round(120 + (bg - 120) * f), b = Math.round(200 + (bb - 200) * f);
-  return `rgb(${r},${g},${b})`;
+  return [
+    Math.round(64 + (br - 64) * f),
+    Math.round(120 + (bg - 120) * f),
+    Math.round(200 + (bb - 200) * f),
+  ];
 }
 
+/** Scale a colour toward black (f < 1) or white (f > 1). */
+function shade([r, g, b], f) {
+  const mix = (c) => f <= 1
+    ? Math.round(c * f)
+    : Math.round(c + (255 - c) * (f - 1));
+  return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+}
+
+function rgba([r, g, b], alpha) { return `rgba(${r},${g},${b},${alpha})`; }
+
+/** Kept for the ride list swatches and anything else wanting one colour. */
+function rideColor(i, total) { return shade(rideRGB(i, total), 1); }
+
+// How the track is drawn: a dark core over a wide, soft glow in the same hue.
+const LINE_DARKEN = 0.55;   // core line, relative to the ride's colour
+const HALO_WEIGHT = 9;
+const HALO_ALPHA  = 0.32;
+
 function drawRides() {
+  haloLayer.clearLayers();
   rideLayer.clearLayers();
   markerLayer.clearLayers();
   const eps = state.settings.simplify;
   state.rides.forEach((ride, i) => {
     const pts = simplify(ride.points, eps);
+    const rgb = rideRGB(i, state.rides.length);
+
+    // Wide, soft, same hue — reads as a glow under the track rather than a
+    // second line, and gives the dark core something to sit against on both
+    // light and dark basemaps.
     L.polyline(pts, {
-      color: rideColor(i, state.rides.length), weight: 2.5, opacity: .88,
-      // A 2.5px line is hard to hit, especially on a phone; this widens the
-      // clickable area without changing what is drawn.
+      color: rgba(rgb, HALO_ALPHA), weight: HALO_WEIGHT,
+      lineCap: 'round', lineJoin: 'round', interactive: false,
+    }).addTo(haloLayer);
+
+    L.polyline(pts, {
+      color: shade(rgb, LINE_DARKEN), weight: 2.4, opacity: 1,
+      lineCap: 'round', lineJoin: 'round',
+      // A thin line is hard to hit, especially on a phone.
       bubblingMouseEvents: false,
     }).bindTooltip(`${ride.date.slice(0, 10)} — ${ride.name} (${fmtKm(ride.dist)} km)`)
       .on('click', (e) => { L.DomEvent.stop(e); showRideProfile(ride); })
@@ -843,7 +880,8 @@ function renderRides() {
   state.rides.forEach((r, i) => {
     const li = document.createElement('li');
     li.innerHTML =
-      `<span class="sw" style="background:${rideColor(i, state.rides.length)}"></span>` +
+      `<span class="sw" style="background:${shade(rideRGB(i, state.rides.length), LINE_DARKEN)};` +
+      `box-shadow:0 0 0 2px ${rgba(rideRGB(i, state.rides.length), 0.35)}"></span>` +
       `<span class="nm" title="${escapeHTML(r.name)}">${escapeHTML(r.name)}</span>` +
       `<span class="meta">${r.date.slice(0, 10)} · ${fmtKm(r.dist)} km` +
       (r.ascent > 0 ? ` · ${Math.round(r.ascent).toLocaleString()} m` : '') +
@@ -1114,7 +1152,8 @@ function shareableHTML() {
     basemap: state.settings.basemap,
     rides: state.rides.map((r, i) => ({
       n: r.name, d: r.date.slice(0, 10), km: +r.dist.toFixed(1),
-      c: rideColor(i, state.rides.length),
+      c: shade(rideRGB(i, state.rides.length), LINE_DARKEN),
+      h: rgba(rideRGB(i, state.rides.length), HALO_ALPHA),
       p: simplify(r.points, eps).map(([a, o]) => [+a.toFixed(5), +o.toFixed(5)]),
     })),
     transfers: state.transfers.map(t => ({
@@ -1181,7 +1220,10 @@ if(bm.type==='vector'&&typeof L.maplibreGL==='function'){
   L.tileLayer(bm.url,Object.assign({attribution:bm.attribution,maxZoom:bm.maxZoom||18},bm.subdomains?{subdomains:bm.subdomains}:{})).addTo(map);
 }
 const all=[];
-D.rides.forEach(r=>{L.polyline(r.p,{color:r.c,weight:2.5,opacity:.88})
+D.rides.forEach(r=>{
+  if(r.h) L.polyline(r.p,{color:r.h,weight:9,lineCap:'round',lineJoin:'round',interactive:false}).addTo(map);
+});
+D.rides.forEach(r=>{L.polyline(r.p,{color:r.c,weight:2.4,opacity:1,lineCap:'round',lineJoin:'round'})
   .bindTooltip(r.d+' — '+r.n+' ('+r.km+' km)').addTo(map);all.push(r.p[0],r.p[r.p.length-1]);});
 const used={};
 D.transfers.forEach(t=>{const s=MODES[t.m]||MODES.other;used[t.m]=1;
