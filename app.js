@@ -287,13 +287,25 @@ async function rwSync() {
       throw new Error('The "from" date is after the "up to" date');
     }
 
-    const known = new Set(state.rides.map(r => r.srcId).filter(Boolean));
+    const known = new Map(state.rides.filter(r => r.srcId).map(r => [r.srcId, r]));
     const dated = trips.filter(t => t.departed_at);
     const inRange = dated.filter(t => {
       const ms = Date.parse(t.departed_at);
       return ms >= fromMs && ms <= toMs;
     });
-    const todo = inRange.filter(t => !known.has('rw' + t.id));
+
+    // Re-fetch a ride we already hold if it has no elevation on it. Rides
+    // synced before elevation was captured are stored as plain [lat, lon],
+    // and skipping them on the grounds that we "have" them would leave the
+    // profile permanently empty with no way to repair it.
+    const stale = [];
+    const todo = inRange.filter(t => {
+      const have = known.get('rw' + t.id);
+      if (!have) return true;
+      const hasEle = have.points.some(p => p.length > 2 && p[2] != null);
+      if (!hasEle) { stale.push('rw' + t.id); return true; }
+      return false;
+    });
 
     // Not named `window` — that shadows the global inside this function.
     const rangeText = (from || to)
@@ -312,9 +324,12 @@ async function rwSync() {
       const raw = trip.track_points || [];
       // Ride with GPS names elevation "e" on each track point; it rides along
       // as a third ordinate, same as the GPX path.
-      const points = raw.filter(p => p.y != null && p.x != null)
-                        .map(p => (p.e != null && isFinite(p.e))
-                                  ? [p.y, p.x, Number(p.e)] : [p.y, p.x]);
+      const points = raw.filter(p => p.y != null && p.x != null).map(p => {
+        // Documented as `e`; the others cost nothing and guard against a
+        // response shape that differs from the reference.
+        const e = [p.e, p.elevation, p.ele].find(v => v != null && isFinite(v));
+        return e != null ? [p.y, p.x, Number(e)] : [p.y, p.x];
+      });
       if (points.length < 2) continue;
 
       // Duration comes from the API's own field, as asked. Climbing is
@@ -322,6 +337,10 @@ async function rwSync() {
       // same way a GPX file is read — one number, one source.
       const dur = [trip.duration, t.duration, trip.moving_time]
                     .find(v => v != null && isFinite(v) && v > 0);
+
+      // Replace rather than duplicate when refreshing a stale ride.
+      const existingAt = state.rides.findIndex(r => r.srcId === 'rw' + t.id);
+      if (existingAt !== -1) state.rides.splice(existingAt, 1);
 
       state.rides.push({
         id: uid(), srcId: 'rw' + t.id,
@@ -337,9 +356,12 @@ async function rwSync() {
     sortRides();
     localStorage.setItem('rw', JSON.stringify({ key, tok, user: userId, from, to }));
     prog.textContent = '';
-    let msg = todo.length
-      ? `Added ${todo.length} ride${todo.length === 1 ? '' : 's'} from Ride with GPS`
-      : `Already up to date — no new rides${rangeText}`;
+    const added = todo.length - stale.length;
+    const parts = [];
+    if (added > 0) parts.push(`Added ${added} ride${added === 1 ? '' : 's'}`);
+    if (stale.length) parts.push(`refreshed ${stale.length} for elevation`);
+    let msg = parts.length ? parts.join(', ')
+                           : `Already up to date — no new rides${rangeText}`;
     if (outOfRange) msg += `; ${outOfRange} outside the date range were skipped`;
     toast(msg);
     refreshAll();
@@ -1287,7 +1309,13 @@ function renderProfile() {
   const series = profile.series;
   if (series.length < 2) {
     svg.innerHTML = '';
-    $('#p-stats').textContent = 'no elevation data in these rides';
+    // Rides stored before elevation was captured are the usual cause, and
+    // "no data" alone gives no way out of it.
+    const fromRw = state.rides.some(r => r.srcId);
+    $('#p-stats').textContent = fromRw
+      ? 'No elevation on these rides — run Fetch rides again to pull it in'
+      : 'No elevation in these files — the GPX has no <ele> values';
+    $('#p-readout').textContent = '';
     return;
   }
 
@@ -1414,17 +1442,39 @@ function syncProfileButton() {
   document.body.classList.toggle('has-scrubber', !$('#scrubber').hidden);
 }
 
-let rideHighlight = null;
+let rideHighlight = null;          // [layers] — the line plus its end caps
+
+/** Pick a ride out of the journey: a halo under its line, and labelled caps
+ *  so it is obvious which way it ran and where it began and ended. Without
+ *  the caps a highlighted segment is just a brighter line among others. */
 function highlightRide(ride) {
   clearRideHighlight();
-  rideHighlight = L.polyline(simplify(ride.points, state.settings.simplify), {
-    color: '#fff', weight: 6, opacity: .55,
-  }).addTo(map);
-  if (rideHighlight.bringToBack) rideHighlight.bringToBack();
-  map.fitBounds(rideHighlight.getBounds().pad(0.15));
+  const pts = simplify(ride.points, state.settings.simplify);
+  const a = pts[0], b = pts[pts.length - 1];
+
+  const halo = L.polyline(pts, { color: '#fff', weight: 8, opacity: .35 }).addTo(map);
+  const line = L.polyline(pts, { color: '#fff', weight: 2.5, opacity: .95 }).addTo(map);
+  if (halo.bringToBack) halo.bringToBack();
+
+  const cap = (pt, fill, label) =>
+    L.circleMarker(pt, { radius: 7, color: '#15150f', weight: 2,
+                         fillColor: fill, fillOpacity: 1 })
+     .bindTooltip(label, { permanent: false, direction: 'top' })
+     .addTo(map);
+
+  rideHighlight = [
+    halo, line,
+    cap(a, '#8fbf6f', `Start — ${ride.date.slice(0, 10)}`),
+    cap(b, state.settings.brand, `End — ${fmtKm(ride.dist)} km`),
+  ];
+
+  map.fitBounds(L.latLngBounds(pts).pad(0.2));
 }
+
 function clearRideHighlight() {
-  if (rideHighlight) { map.removeLayer(rideHighlight); rideHighlight = null; }
+  if (!rideHighlight) return;
+  rideHighlight.forEach(l => map.removeLayer(l));
+  rideHighlight = null;
 }
 
 // ── Publishing ──────────────────────────────────────────────────────────────
