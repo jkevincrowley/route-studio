@@ -521,6 +521,12 @@ async function forceMercator(url) {
   }
 }
 
+/** Tell Leaflet the container changed size. Cheap, and safe to over-call. */
+function resizeMap() {
+  if (!map) return;
+  requestAnimationFrame(() => map.invalidateSize({ animate: false }));
+}
+
 function setBasemap(kind) {
   const bm = BASEMAPS[kind] || BASEMAPS[Object.keys(BASEMAPS)[0]];
   const attribution = bm.attribution || OSM_ATTRIB;
@@ -579,7 +585,11 @@ function drawRides() {
     const pts = simplify(ride.points, eps);
     L.polyline(pts, {
       color: rideColor(i, state.rides.length), weight: 2.5, opacity: .88,
+      // A 2.5px line is hard to hit, especially on a phone; this widens the
+      // clickable area without changing what is drawn.
+      bubblingMouseEvents: false,
     }).bindTooltip(`${ride.date.slice(0, 10)} — ${ride.name} (${fmtKm(ride.dist)} km)`)
+      .on('click', (e) => { L.DomEvent.stop(e); showRideProfile(ride); })
       .addTo(rideLayer);
   });
 
@@ -926,6 +936,7 @@ function escapeHTML(s) {
 
 function refreshAll() {
   drawRides();
+  syncProfileButton();
   drawTransfers();
   recomputeRuns();
   renderRides();
@@ -1225,6 +1236,197 @@ function doExport(kind) {
 }
 
 
+
+// ── Elevation profile ───────────────────────────────────────────────────────
+// Distance along the bottom, height up the side. Transfers are excluded by
+// construction: the series is built from ride points only, so a ferry leg is a
+// join between rides rather than a stretch of the graph.
+
+const profile = { series: [], ride: null, marker: null, hi: null, w: 1000, h: 104 };
+
+/** [{km, ele, pt}] for a set of rides, distance accumulating across them.
+ *  Rides without elevation are skipped — they would otherwise read as a drop
+ *  to zero and wreck the vertical scale. */
+function buildProfile(rides) {
+  const out = [];
+  let km = 0;
+  for (const r of rides) {
+    const pts = r.points;
+    const hasEle = pts.some(p => p[2] != null && isFinite(p[2]));
+    for (let i = 0; i < pts.length; i++) {
+      if (i > 0) km += haversineKm(pts[i - 1], pts[i]);
+      const e = pts[i][2];
+      if (hasEle && e != null && isFinite(e)) out.push({ km, ele: e, pt: pts[i] });
+    }
+  }
+  return out;
+}
+
+/** Thin to about one sample per pixel — an SVG path with 50k points is
+ *  pointless and slow. Keeps the extremes of each bucket so peaks survive. */
+function thinProfile(series, targetPts) {
+  if (series.length <= targetPts) return series;
+  const bucket = series.length / targetPts;
+  const out = [];
+  for (let b = 0; b < targetPts; b++) {
+    const a = Math.floor(b * bucket), z = Math.min(series.length, Math.floor((b + 1) * bucket));
+    if (z <= a) continue;
+    let lo = series[a], hi = series[a];
+    for (let i = a; i < z; i++) {
+      if (series[i].ele < lo.ele) lo = series[i];
+      if (series[i].ele > hi.ele) hi = series[i];
+    }
+    // keep them in distance order so the line reads left to right
+    if (lo.km <= hi.km) out.push(lo, hi); else out.push(hi, lo);
+  }
+  return out;
+}
+
+function renderProfile() {
+  const svg = $('#p-svg');
+  const series = profile.series;
+  if (series.length < 2) {
+    svg.innerHTML = '';
+    $('#p-stats').textContent = 'no elevation data in these rides';
+    return;
+  }
+
+  const W = 1000, H = profile.h, pad = 4;
+  const maxKm = series[series.length - 1].km || 1;
+  let lo = Infinity, hi = -Infinity;
+  for (const s of series) { if (s.ele < lo) lo = s.ele; if (s.ele > hi) hi = s.ele; }
+  const span = Math.max(1, hi - lo);
+  profile.w = W; profile.maxKm = maxKm; profile.lo = lo; profile.span = span;
+
+  const thin = thinProfile(series, 900);
+  const x = s => (s.km / maxKm) * W;
+  const y = s => pad + (1 - (s.ele - lo) / span) * (H - pad * 2);
+
+  let d = `M ${x(thin[0]).toFixed(1)} ${y(thin[0]).toFixed(1)}`;
+  for (let i = 1; i < thin.length; i++) d += ` L ${x(thin[i]).toFixed(1)} ${y(thin[i]).toFixed(1)}`;
+  const area = d + ` L ${W} ${H} L 0 ${H} Z`;
+
+  const brand = state.settings.brand;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML =
+    `<defs><linearGradient id="pg" x1="0" x2="0" y1="0" y2="1">` +
+      `<stop offset="0%" stop-color="${brand}" stop-opacity=".45"/>` +
+      `<stop offset="100%" stop-color="${brand}" stop-opacity="0"/></linearGradient></defs>` +
+    `<path d="${area}" fill="url(#pg)"/>` +
+    `<path d="${d}" fill="none" stroke="${brand}" stroke-width="1.6"` +
+    ` vector-effect="non-scaling-stroke" stroke-linejoin="round"/>` +
+    `<line id="p-cursor" x1="0" y1="0" x2="0" y2="${H}" stroke="#fff"` +
+    ` stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>`;
+
+  $('#p-stats').textContent =
+    `${fmtKm(maxKm)} km · ${Math.round(lo).toLocaleString()}–${Math.round(hi).toLocaleString()} m`;
+}
+
+/** Follow the pointer: move a dot on the map and read out the numbers. */
+function profileAt(clientX) {
+  const svg = $('#p-svg');
+  const box = svg.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (clientX - box.left) / box.width));
+  const series = profile.series;
+  if (series.length < 2) return;
+
+  const targetKm = frac * profile.maxKm;
+  let lo = 0, hi = series.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (series[m].km < targetKm) lo = m + 1; else hi = m; }
+  const s = series[lo];
+
+  const cur = svg.querySelector('#p-cursor');
+  if (cur) { cur.setAttribute('x1', frac * profile.w); cur.setAttribute('x2', frac * profile.w); cur.setAttribute('opacity', '1'); }
+
+  if (!profile.marker) {
+    profile.marker = L.circleMarker(s.pt, { radius: 6, color: '#fff', weight: 2,
+      fillColor: state.settings.brand, fillOpacity: 1 }).addTo(map);
+  } else {
+    profile.marker.setLatLng(s.pt);
+  }
+  $('#p-readout').textContent =
+    `${fmtKm(s.km)} km · ${Math.round(s.ele).toLocaleString()} m`;
+}
+
+function clearProfileCursor() {
+  const cur = $('#p-svg').querySelector('#p-cursor');
+  if (cur) cur.setAttribute('opacity', '0');
+  if (profile.marker) { map.removeLayer(profile.marker); profile.marker = null; }
+  $('#p-readout').textContent = '';
+}
+
+/** Whole journey: every ride, transfers excluded by construction. */
+function showJourneyProfile() {
+  profile.ride = null;
+  profile.rideBits = null;
+  profile.series = buildProfile(state.rides);
+  clearRideHighlight();
+  $('#p-title').textContent = state.name || 'Whole journey';
+  $('#p-back').hidden = true;
+  openProfile();
+}
+
+/** One ride, with its own stats and the segment picked out on the map. */
+function showRideProfile(ride) {
+  profile.ride = ride;
+  profile.series = buildProfile([ride]);
+  highlightRide(ride);
+
+  const bits = [ride.date.slice(0, 10), `${fmtKm(ride.dist)} km`];
+  if (ride.ascent > 0) bits.push(`${Math.round(ride.ascent).toLocaleString()} m climbed`);
+  const d = fmtDuration(ride.duration);
+  if (d) bits.push(d + (ride.elapsed ? ' elapsed' : ' moving'));
+  profile.rideBits = bits;
+
+  $('#p-title').textContent = ride.name;
+  $('#p-back').hidden = state.rides.length < 2;
+  openProfile();
+
+}
+
+function openProfile() {
+  $('#profile').hidden = false;
+  $('#p-show').hidden = true;
+  renderProfile();
+  // Ride stats sit alongside the elevation range rather than replacing it.
+  if (profile.rideBits && profile.ride) {
+    $('#p-stats').textContent = profile.rideBits.join(' · ') + ' · ' + $('#p-stats').textContent;
+  }
+  resizeMap();
+}
+
+function closeProfile() {
+  $('#profile').hidden = true;
+  $('#p-show').hidden = !state.rides.length;
+  clearProfileCursor();
+  clearRideHighlight();
+  profile.ride = null;
+  resizeMap();
+}
+
+/** Show the Elevation button only when some ride actually carries elevation. */
+function syncProfileButton() {
+  const any = state.rides.some(r =>
+    r.points.some(p => p[2] != null && isFinite(p[2])));
+  const open = !$('#profile').hidden;
+  $('#p-show').hidden = !any || open;
+  if (!any && open) closeProfile();
+  document.body.classList.toggle('has-scrubber', !$('#scrubber').hidden);
+}
+
+let rideHighlight = null;
+function highlightRide(ride) {
+  clearRideHighlight();
+  rideHighlight = L.polyline(simplify(ride.points, state.settings.simplify), {
+    color: '#fff', weight: 6, opacity: .55,
+  }).addTo(map);
+  if (rideHighlight.bringToBack) rideHighlight.bringToBack();
+  map.fitBounds(rideHighlight.getBounds().pad(0.15));
+}
+function clearRideHighlight() {
+  if (rideHighlight) { map.removeLayer(rideHighlight); rideHighlight = null; }
+}
+
 // ── Publishing ──────────────────────────────────────────────────────────────
 // A published map is one Firestore document: the project, gzipped and
 // base64'd, under the 1 MiB document ceiling. No SDK — the REST API is two
@@ -1384,6 +1586,10 @@ function showShareLink(id, bytes) {
 /** Load a published map into the viewer. */
 async function openPublished(id) {
   document.body.classList.add('viewing');
+  // The map was sized with the panel and topbar on screen. Hiding them does
+  // not tell Leaflet anything, so without this it keeps painting at the old
+  // size — a dead strip on the right, and below the fold on mobile.
+  resizeMap();
   status('Loading…');
   try {
     if (!publishConfigured()) throw new Error('sharing is not configured on this copy');
@@ -1538,6 +1744,24 @@ function wire() {
   $('#share-modal').addEventListener('click', e => {
     if (e.target.id === 'share-modal') $('#share-modal').hidden = true;
   });
+
+  // Elevation profile
+  $('#p-close').onclick = closeProfile;
+  $('#p-show').onclick = showJourneyProfile;
+  $('#p-back').onclick = showJourneyProfile;
+
+  const svg = $('#p-svg');
+  const track = e => {
+    const x = e.touches ? e.touches[0].clientX : e.clientX;
+    profileAt(x);
+  };
+  svg.addEventListener('pointermove', track);
+  svg.addEventListener('pointerdown', track);
+  svg.addEventListener('pointerleave', clearProfileCursor);
+  svg.addEventListener('touchmove', e => { e.preventDefault(); track(e); }, { passive: false });
+
+  window.addEventListener('resize', resizeMap);
+  window.addEventListener('orientationchange', resizeMap);
 
   // Export menu
   const menu = $('#export-menu');

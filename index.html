@@ -154,6 +154,23 @@
 
   <div id="map-wrap">
     <div id="map"></div>
+    <div id="profile" hidden>
+      <div class="p-head">
+        <div>
+          <strong id="p-title"></strong>
+          <span id="p-stats"></span>
+        </div>
+        <div class="p-actions">
+          <button id="p-back" class="link" hidden>← whole journey</button>
+          <button id="p-close" class="link">Hide</button>
+        </div>
+      </div>
+      <svg id="p-svg" preserveAspectRatio="none" aria-label="Elevation profile"></svg>
+      <div id="p-readout" class="mono"></div>
+    </div>
+
+    <button id="p-show" class="round-wide" hidden>Elevation</button>
+
     <div id="scrubber" hidden>
       <button id="btn-play-2" class="round">▶</button>
       <input id="progress" type="range" min="0" max="1000" value="0">
