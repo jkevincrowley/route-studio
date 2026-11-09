@@ -1365,13 +1365,52 @@ function thinProfile(series, targetPts) {
   return out;
 }
 
+// Margins hold the axis labels. In pixels, because the SVG is now drawn at
+// its real size — a stretched viewBox would squash the text.
+const PLOT = { left: 46, right: 10, top: 8, bottom: 18 };
+
+/** Round numbers a person would actually label an axis with.
+ *
+ *  Picks the nearest of 1/2/2.5/5/10 × 10^n to the ideal spacing. Rounding up
+ *  instead — the obvious shortcut — overshoots badly on ranges that do not
+ *  start at zero: 112–1840 m wanted a 500 m step and got 1000, leaving one
+ *  lonely gridline at 1000.
+ */
+function niceTicks(lo, hi, want) {
+  const span = hi - lo;
+  if (!(span > 0)) return [lo];
+
+  const ideal = span / Math.max(1, want);
+  const mag = Math.pow(10, Math.floor(Math.log10(ideal)));
+  const norm = ideal / mag;
+  const step = [1, 2, 2.5, 5, 10]
+    .reduce((best, m) => Math.abs(m - norm) < Math.abs(best - norm) ? m : best, 1) * mag;
+
+  const build = (st) => {
+    // Multiply out from an index rather than accumulating: repeated += on a
+    // fractional step drifts (0.1 + 0.1 + 0.1 = 0.30000000000000004).
+    const dp = Math.max(0, -Math.floor(Math.log10(st)) + 1);
+    const first = Math.ceil(lo / st);
+    const out = [];
+    for (let k = first; k * st <= hi + 1e-9; k++) {
+      const v = +(k * st).toFixed(dp);
+      out.push(Object.is(v, -0) ? 0 : v);
+    }
+    return out;
+  };
+
+  let ticks = build(step);
+  // A range that lands awkwardly can still yield too few; halving recovers it.
+  if (ticks.length < 2) ticks = build(step / 2);
+  if (ticks.length < 2) ticks = [lo, hi];
+  return ticks;
+}
+
 function renderProfile() {
   const svg = $('#p-svg');
   const series = profile.series;
   if (series.length < 2) {
     svg.innerHTML = '';
-    // Rides stored before elevation was captured are the usual cause, and
-    // "no data" alone gives no way out of it.
     const fromRw = state.rides.some(r => r.srcId);
     $('#p-stats').textContent = fromRw
       ? 'No elevation on these rides — run Fetch rides again to pull it in'
@@ -1380,32 +1419,62 @@ function renderProfile() {
     return;
   }
 
-  const W = 1000, H = profile.h, pad = 4;
+  // Draw at the element's real pixel size so axis text is not distorted.
+  const rect = svg.getBoundingClientRect();
+  const W = Math.max(240, Math.round(rect.width));
+  const H = Math.max(60, Math.round(rect.height));
+  const x0 = PLOT.left, x1 = W - PLOT.right;
+  const y0 = PLOT.top,  y1 = H - PLOT.bottom;
+
   const maxKm = series[series.length - 1].km || 1;
   let lo = Infinity, hi = -Infinity;
   for (const s of series) { if (s.ele < lo) lo = s.ele; if (s.ele > hi) hi = s.ele; }
-  const span = Math.max(1, hi - lo);
-  profile.w = W; profile.maxKm = maxKm; profile.lo = lo; profile.span = span;
+  // A flat ride would otherwise divide by zero and fill the panel with noise.
+  if (hi - lo < 10) { const mid = (hi + lo) / 2; lo = mid - 5; hi = mid + 5; }
+  const span = hi - lo;
 
-  const thin = thinProfile(series, 900);
-  const x = s => (s.km / maxKm) * W;
-  const y = s => pad + (1 - (s.ele - lo) / span) * (H - pad * 2);
+  Object.assign(profile, { W, H, x0, x1, y0, y1, maxKm, lo, span });
 
-  let d = `M ${x(thin[0]).toFixed(1)} ${y(thin[0]).toFixed(1)}`;
-  for (let i = 1; i < thin.length; i++) d += ` L ${x(thin[i]).toFixed(1)} ${y(thin[i]).toFixed(1)}`;
-  const area = d + ` L ${W} ${H} L 0 ${H} Z`;
+  const X = km  => x0 + (km / maxKm) * (x1 - x0);
+  const Y = ele => y0 + (1 - (ele - lo) / span) * (y1 - y0);
+
+  const thin = thinProfile(series, Math.round((x1 - x0) * 1.5));
+  let d = `M ${X(thin[0].km).toFixed(1)} ${Y(thin[0].ele).toFixed(1)}`;
+  for (let i = 1; i < thin.length; i++) {
+    d += ` L ${X(thin[i].km).toFixed(1)} ${Y(thin[i].ele).toFixed(1)}`;
+  }
+  const area = `${d} L ${X(maxKm).toFixed(1)} ${y1} L ${x0} ${y1} Z`;
 
   const brand = state.settings.brand;
+  const grid = [], labels = [];
+
+  for (const e of niceTicks(lo, hi, H < 90 ? 2 : 3)) {
+    const y = Y(e).toFixed(1);
+    grid.push(`<line x1="${x0}" x2="${x1}" y1="${y}" y2="${y}" stroke="#ffffff14"/>`);
+    labels.push(`<text x="${x0 - 7}" y="${y}" text-anchor="end" dominant-baseline="middle"` +
+                ` class="ax">${Math.round(e).toLocaleString()}</text>`);
+  }
+  for (const km of niceTicks(0, maxKm, W < 520 ? 3 : 6)) {
+    const x = X(km).toFixed(1);
+    grid.push(`<line x1="${x}" x2="${x}" y1="${y0}" y2="${y1}" stroke="#ffffff0e"/>`);
+    labels.push(`<text x="${x}" y="${y1 + 13}" text-anchor="middle" class="ax">` +
+                `${km >= 1000 ? Math.round(km).toLocaleString() : +km.toFixed(km < 10 ? 1 : 0)}</text>`);
+  }
+
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.innerHTML =
     `<defs><linearGradient id="pg" x1="0" x2="0" y1="0" y2="1">` +
       `<stop offset="0%" stop-color="${brand}" stop-opacity=".45"/>` +
       `<stop offset="100%" stop-color="${brand}" stop-opacity="0"/></linearGradient></defs>` +
+    grid.join('') +
     `<path d="${area}" fill="url(#pg)"/>` +
-    `<path d="${d}" fill="none" stroke="${brand}" stroke-width="1.6"` +
-    ` vector-effect="non-scaling-stroke" stroke-linejoin="round"/>` +
-    `<line id="p-cursor" x1="0" y1="0" x2="0" y2="${H}" stroke="#fff"` +
-    ` stroke-width="1" vector-effect="non-scaling-stroke" opacity="0"/>`;
+    `<path d="${d}" fill="none" stroke="${brand}" stroke-width="1.6" stroke-linejoin="round"/>` +
+    `<line x1="${x0}" x2="${x1}" y1="${y1}" y2="${y1}" stroke="#ffffff2a"/>` +
+    labels.join('') +
+    `<text x="${x1}" y="${y1 + 13}" text-anchor="end" class="ax dim">km</text>` +
+    `<text x="${x0 - 7}" y="${y0 - 1}" text-anchor="end" class="ax dim">m</text>` +
+    `<line id="p-cursor" x1="0" y1="${y0}" x2="0" y2="${y1}" stroke="#fff"` +
+    ` stroke-width="1" opacity="0"/>`;
 
   $('#p-stats').textContent =
     `${fmtKm(maxKm)} km · ${Math.round(lo).toLocaleString()}–${Math.round(hi).toLocaleString()} m`;
@@ -1414,10 +1483,14 @@ function renderProfile() {
 /** Follow the pointer: move a dot on the map and read out the numbers. */
 function profileAt(clientX) {
   const svg = $('#p-svg');
-  const box = svg.getBoundingClientRect();
-  const frac = Math.min(1, Math.max(0, (clientX - box.left) / box.width));
   const series = profile.series;
-  if (series.length < 2) return;
+  if (series.length < 2 || profile.x1 == null) return;
+
+  // The SVG is drawn at its real pixel size, so CSS pixels and viewBox units
+  // line up and the plot inset can be subtracted directly.
+  const box = svg.getBoundingClientRect();
+  const px = Math.min(profile.x1, Math.max(profile.x0, clientX - box.left));
+  const frac = (px - profile.x0) / Math.max(1, profile.x1 - profile.x0);
 
   const targetKm = frac * profile.maxKm;
   let lo = 0, hi = series.length - 1;
@@ -1425,7 +1498,7 @@ function profileAt(clientX) {
   const s = series[lo];
 
   const cur = svg.querySelector('#p-cursor');
-  if (cur) { cur.setAttribute('x1', frac * profile.w); cur.setAttribute('x2', frac * profile.w); cur.setAttribute('opacity', '1'); }
+  if (cur) { cur.setAttribute('x1', px); cur.setAttribute('x2', px); cur.setAttribute('opacity', '1'); }
 
   if (!profile.marker) {
     profile.marker = L.circleMarker(s.pt, { radius: 6, color: '#fff', weight: 2,
@@ -1893,8 +1966,15 @@ function wire() {
   svg.addEventListener('pointerleave', clearProfileCursor);
   svg.addEventListener('touchmove', e => { e.preventDefault(); track(e); }, { passive: false });
 
-  window.addEventListener('resize', resizeMap);
-  window.addEventListener('orientationchange', resizeMap);
+  let profileRedraw;
+  const onViewportChange = () => {
+    resizeMap();
+    // Axis ticks are laid out in pixels, so the plot has to be redrawn.
+    clearTimeout(profileRedraw);
+    profileRedraw = setTimeout(() => { if (!$('#profile').hidden) renderProfile(); }, 120);
+  };
+  window.addEventListener('resize', onViewportChange);
+  window.addEventListener('orientationchange', onViewportChange);
 
   // Export menu
   const menu = $('#export-menu');

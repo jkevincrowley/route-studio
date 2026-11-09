@@ -258,6 +258,12 @@ body.has-scrubber #profile { bottom: 66px; }
   display: block; width: 100%; height: 104px; overflow: visible;
   touch-action: none; cursor: crosshair;
 }
+#p-svg .ax {
+  fill: var(--muted); font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#p-svg .ax.dim { opacity: .55; }
+
 #p-readout {
   font-size: 11px; color: var(--muted); height: 15px; margin-top: 1px;
 }
