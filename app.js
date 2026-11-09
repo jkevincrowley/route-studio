@@ -300,19 +300,20 @@ function joinJourney(rides, transfers, tolKm) {
       continue;
     }
 
-    let bridge = null;
-    for (const c of pool) {
-      if (c.used) continue;
-      const p = c.points, a = p[0], b = p[p.length - 1];
-      if (haversineKm(end, a) <= tolKm && haversineKm(b, start) <= tolKm) bridge = p;
-      else if (haversineKm(end, b) <= tolKm && haversineKm(a, start) <= tolKm) bridge = p.slice().reverse();
-      if (bridge) { c.used = true; bridges.push(c); break; }
-    }
-
-    if (bridge) {
-      current = current.concat(bridge, ride.points);
+    const bridge = findBridge(end, start, pool, tolKm);
+    if (bridge.found) {
+      bridge.legs.forEach(idx => { pool[idx].used = true; bridges.push(pool[idx]); });
+      current = current.concat(bridge.points, ride.points);
     } else {
-      runs.push({ points: current, bridges });
+      runs.push({
+        points: current, bridges,
+        breakAfter: {
+          gapKm: haversineKm(end, start),
+          nearestKm: bridge.bestKm,          // how far short the best chain stopped
+          nearestLabel: bridge.bestLabel,
+          date: ride.date ? String(ride.date).slice(0, 10) : null,
+        },
+      });
       current = ride.points.slice();
       bridges = [];
     }
@@ -320,6 +321,53 @@ function joinJourney(rides, transfers, tolKm) {
   runs.push({ points: current, bridges });
   runs.forEach(r => { r.km = pathKm(r.points); });
   return runs;
+}
+
+/** Find a chain of drawn transfers leading from `end` to `start`.
+ *
+ * A gap is often covered by more than one leg — two trains with a change in
+ * between, or a bus to a port then a ferry. Matching only single transfers
+ * left those gaps unbridged even though the user had drawn every piece.
+ *
+ * Breadth-first over the unused transfers, so the fewest-leg chain wins. Each
+ * transfer is undirected: whichever end is reachable becomes its entry point
+ * and the line is reversed if needed.
+ */
+function findBridge(end, start, pool, tolKm, maxLegs = 6, maxVisits = 20000) {
+  const queue = [{ pos: end, legs: [], points: [] }];
+  let head = 0, visits = 0;
+  // Closest any chain got to the next ride. When nothing reaches, this is the
+  // number worth showing: "your legs stop N km short", not the distance to a
+  // leg that already attaches perfectly at its other end.
+  let bestKm = Infinity, bestLabel = null;
+
+  while (head < queue.length) {
+    const cur = queue[head++];
+    if (++visits > maxVisits) break;      // pathological pools shouldn't hang the UI
+
+    if (cur.legs.length) {
+      const d = haversineKm(cur.pos, start);
+      if (d <= tolKm) return { found: true, points: cur.points, legs: cur.legs };
+      if (d < bestKm) { bestKm = d; bestLabel = pool[cur.legs[cur.legs.length - 1]].label; }
+    }
+    if (cur.legs.length >= maxLegs) continue;
+
+    for (let i = 0; i < pool.length; i++) {
+      if (pool[i].used || cur.legs.indexOf(i) !== -1) continue;
+      const p = pool[i].points;
+      let seg = null;
+      if (haversineKm(cur.pos, p[0]) <= tolKm) seg = p;
+      else if (haversineKm(cur.pos, p[p.length - 1]) <= tolKm) seg = p.slice().reverse();
+      if (!seg) continue;
+
+      queue.push({
+        pos: seg[seg.length - 1],
+        legs: cur.legs.concat(i),
+        points: cur.points.concat(seg),
+      });
+    }
+  }
+  return { found: false, bestKm: isFinite(bestKm) ? bestKm : null, bestLabel };
 }
 
 function recomputeRuns() {
@@ -330,15 +378,35 @@ function recomputeRuns() {
 
   const el = $('#join-report');
   if (!state.rides.length) { el.innerHTML = ''; return; }
+
   let html = `<b>${state.runs.length}</b> continuous run${state.runs.length === 1 ? '' : 's'}` +
              ` &middot; <b>${fmtKm(totalKm)} km</b>`;
-  if (state.runs.length > 1) {
-    html += `<br>Draw a transfer across each remaining gap to merge them into one line.`;
+
+  // Name each remaining gap and say what is stopping it joining. A chain of
+  // several transfers counts, so "nearly reached" usually means one leg is
+  // short rather than that a whole transfer is missing.
+  const breaks = state.runs.filter(r => r.breakAfter).map(r => r.breakAfter);
+  if (breaks.length) {
+    html += '<br><br>Gaps still open:';
+    breaks.slice(0, 6).forEach(b => {
+      html += `<br>&middot; <b>${fmtKm(b.gapKm)} km</b>` +
+              (b.date ? ` before ${b.date}` : '');
+      if (b.nearestKm == null) {
+        html += ' — nothing drawn across it';
+      } else if (b.nearestKm <= state.settings.tol * 3) {
+        html += ` — <span class="warn">“${escapeHTML(b.nearestLabel)}” stops ` +
+                `${fmtKm(b.nearestKm)} km short</span> (tolerance ${state.settings.tol} km)`;
+      } else {
+        html += ' — no drawn transfer reaches it';
+      }
+    });
+    if (breaks.length > 6) html += `<br>&middot; …and ${breaks.length - 6} more`;
   }
+
   if (unmatched > 0) {
-    html += `<br><span class="warn">${unmatched} transfer${unmatched === 1 ? '' : 's'} ` +
-            `did not match a gap — the ends are more than ${state.settings.tol} km ` +
-            `from any ride. Extend the line or raise the join tolerance.</span>`;
+    html += `<br><br><span class="warn">${unmatched} transfer${unmatched === 1 ? '' : 's'} ` +
+            `unused.</span> Transfers can chain — two trains in a row will join, ` +
+            `provided each leg ends within ${state.settings.tol} km of the next.`;
   }
   el.innerHTML = html;
 }
