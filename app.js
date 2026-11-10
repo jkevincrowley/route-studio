@@ -1683,7 +1683,8 @@ function build(map){
 }
 
 function doExport(kind) {
-  if (kind === 'publish') { publish(); return; }
+  if (kind === 'publish-map')   { publish(false); return; }
+  if (kind === 'publish-story') { publish(true); return; }
   const safe = state.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'journey';
   if (!state.rides.length && kind !== 'project') { toast('Add some rides first', true); return; }
   if (kind === 'geojson') download(safe + '-route.geojson', JSON.stringify(runsGeoJSON()), 'application/geo+json');
@@ -2439,7 +2440,12 @@ async function base64ToText(b64) {
 
 /** The project as published: simplified for viewing, full fidelity dropped.
  *  Viewers get a map, not a data archive — and the payload has to fit. */
-function publishPayload(simplifyM) {
+/** `withStory` decides which of the two share links this is. The viewer
+ *  opens into the story when chapters arrive and shows the bare animated map
+ *  when they do not, so leaving them out is the whole difference — and it
+ *  means a map link cannot leak writing that was meant for a different
+ *  audience. */
+function publishPayload(simplifyM, withStory) {
   const eps = Math.max(state.settings.simplify, simplifyM);
   const totals = rideTotals();
   return {
@@ -2464,12 +2470,16 @@ function publishPayload(simplifyM) {
       id: t.id, mode: t.mode, label: t.label,
       points: t.points.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]),
     })),
-    chapters: state.chapters,
+    chapters: withStory ? state.chapters : [],
   };
 }
 
-async function publish() {
+async function publish(withStory) {
   if (!state.rides.length) { toast('Add some rides first', true); return; }
+  if (withStory && !state.chapters.length) {
+    toast('No chapters yet — write some in the Story tab first', true);
+    return;
+  }
   if (typeof CompressionStream === 'undefined') {
     toast('This browser cannot compress — try Chrome, Edge, Safari 16.4+ or Firefox 113+', true);
     return;
@@ -2485,7 +2495,7 @@ async function publish() {
     // steps only matter for journeys several times the size of a season.
     let payload = null, b64 = null;
     for (const eps of [10, 15, 20, 30, 50, 80]) {
-      payload = publishPayload(eps);
+      payload = publishPayload(eps, withStory);
       b64 = await gzipToBase64(JSON.stringify(payload));
       if (b64.length <= PUBLISH_BUDGET) break;
     }
@@ -2517,7 +2527,7 @@ async function publish() {
     }
 
     status('');
-    showShareLink(id, b64.length);
+    showShareLink(id, b64.length, withStory);
   } catch (e) {
     status('');
     toast('Could not publish: ' + e.message, true);
@@ -2529,13 +2539,19 @@ function shareUrlFor(id) {
   return `${base}?p=${id}`;
 }
 
-function showShareLink(id, bytes) {
+function showShareLink(id, bytes, withStory) {
   const url = shareUrlFor(id);
   $('#share-url').value = url;
+  $('#share-title').textContent = withStory ? 'Story published' : 'Map published';
   $('#share-note').textContent =
-    `Anyone with this link can view the map. It cannot be edited once published, ` +
-    `and it is not listed anywhere — the link is the only way in. ` +
-    `(${(bytes / 1024).toFixed(0)} KB)`;
+    (withStory
+      ? `This link opens straight into the story, ${state.chapters.length} ` +
+        `chapter${state.chapters.length === 1 ? '' : 's'} of it; closing the ` +
+        `story leaves the map behind. `
+      : `This link opens the animated map on its own. Your chapters are not ` +
+        `in it — publish the story separately to share those. `) +
+    `It cannot be edited once published, and it is not listed anywhere — ` +
+    `the link is the only way in. (${(bytes / 1024).toFixed(0)} KB)`;
   $('#share-modal').hidden = false;
   $('#share-url').select();
 }

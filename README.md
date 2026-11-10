@@ -44,8 +44,8 @@ exports. Your rides live in your own browser and are never uploaded.
 
 ### Sharing (optional)
 
-Only **share links** need anything more, because a link has to be hosted
-somewhere. Your copy ships with that switched off; Publish will simply say
+Only the two **share links** need anything more, because a link has to be
+hosted somewhere. Your copy ships with that switched off; Publish will simply say
 sharing isn't configured.
 
 To turn it on, follow [Setting it up](#setting-it-up) below — a free Firebase
@@ -112,7 +112,9 @@ centred.
 
 | Export | What you get |
 |---|---|
-| **Shareable map (HTML)** | One self-contained file with the map, transfers and a working animation. Upload it anywhere — GitHub Pages, Netlify, any web host. |
+| **Share the animated map** | A link to the journey animating on a map. Chapters are deliberately left out, so writing meant for one audience cannot ride along to another. |
+| **Share the story** | A link that opens straight into the chapters, scrolled through with the map drawing beneath. Closing the story leaves the same map behind. |
+| **Animated map (HTML)** | One self-contained file with the map, transfers and a working animation — the map only, no chapters. Upload it anywhere — GitHub Pages, Netlify, any web host. |
 | **Route line (GeoJSON)** | One `LineString` per continuous run, with distance and which transfers bridged it. |
 | **Route line (GPX)** | The joined route as a track, one segment per run. |
 | **Project file** | Everything, for backup or moving to another machine. |
