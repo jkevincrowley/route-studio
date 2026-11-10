@@ -2629,37 +2629,130 @@ function cameraPlan(m, opts, w, h) {
   return { mode: opts.camera in CAMERA_MOVES ? opts.camera : 'in', fit, metres: c.metres };
 }
 
-/** Place the camera for one frame. `p` runs 0→1 across the whole clip. */
-function applyCamera(m, plan, at, p, w, h) {
-  const dot = [at.pos[1], at.pos[0]];
+/** The camera position for every frame, worked out before anything is drawn.
+ *
+ *  Centring on the dot each frame hands the route's own wobble straight to
+ *  the camera. Worse, it is not even slow: on a 237 km route in a 150-frame
+ *  clip the dot covers 1.6 km a frame, which at a 30 km-wide frame is 57
+ *  pixels — it crosses the whole frame in under a second. A camera glued to
+ *  that can never be still, and a dead zone alone only trims the edges off
+ *  the problem (measured: 56 px a frame down to 49).
+ *
+ *  So the camera does not track the dot at all. It holds one framing, placed
+ *  slightly ahead along the route, and stays perfectly motionless while the
+ *  dot crosses it. Only when the dot reaches the edge does it ease, over
+ *  about a third of a second, to the next framing. Long holds, short glides.
+ *
+ *  None of this is possible live, which is the one luxury of rendering
+ *  offline: the whole camera path is known before the first frame is drawn.
+ */
+function cameraTrack(m, plan, frames, t0, t1, w, h) {
+  const boxW = w * 0.30, boxH = h * 0.30;    // how far off-centre the dot may drift
+  const leadKm = (plan.metres / 1000) * 0.35;            // how far ahead to sit
+  // A glide is paced, not fixed: long enough that it never whips, short
+  // enough that it does not eat the hold it exists to protect.
+  // Proportional, not absolute: an absolute pixel budget would make the
+  // camera behave differently at every output size, and the dialog's little
+  // preview would then be describing a clip nobody is about to render.
+  const GLIDE_PX = Math.max(0.5, w * 0.024);
+  const maxEase = Math.max(6, Math.round(frames * 0.1));
+  const raw = [];
+  const cuts = [];
 
-  if (plan.mode === 'whole') {
-    m.jumpTo({ center: plan.fit.center, zoom: plan.fit.zoom });
-    return;
-  }
-  if (plan.mode === 'follow') {
+  let hold = null, from = null, easeAt = -1, ease = 6, prev = null;
+
+  for (let f = 0; f < frames; f++) {
+    const p = frames > 1 ? f / (frames - 1) : 0;
+    const t = t0 + (t1 - t0) * p;
+    const at = atFraction(t);
+    if (!at) break;
+    const dot = [at.pos[1], at.pos[0]];
+    const jump = prev && haversineKm(prev, at.pos) > (plan.metres / 1000) * 0.5;
+    if (jump) cuts.push(f);
+    prev = at.pos;
+
     m.jumpTo({ center: dot });
-    m.jumpTo({ center: dot, zoom: zoomForWidth(m, plan.metres, w, h) });
-    return;
+    const close = zoomForWidth(m, plan.metres, w, h);
+    const k = plan.mode === 'whole' ? 0
+            : plan.mode === 'follow' ? 1
+            : plan.mode === 'out' ? easeInOut(1 - p) : easeInOut(p);
+    const zoom = plan.fit.zoom + (close - plan.fit.zoom) * k;
+
+    if (plan.mode === 'whole') { raw.push({ center: plan.fit.center.slice(), zoom }); continue; }
+
+    // A framing placed a little way up the route, so the dot enters behind
+    // centre and has most of the frame to cross before the next move.
+    const station = () => {
+      const ahead = atFraction(Math.min(t1, t + leadKm / Math.max(anim.total, 1e-9)));
+      return ahead ? [ahead.pos[1], ahead.pos[0]] : dot.slice();
+    };
+
+    if (!hold || jump) { hold = station(); from = null; easeAt = -1; }
+    else {
+      m.jumpTo({ center: hold, zoom });
+      const q = m.project(dot);
+      const out = Math.abs(q.x - w / 2) > boxW || Math.abs(q.y - h / 2) > boxH;
+      if (out && easeAt < 0) {
+        from = hold.slice();
+        hold = station();
+        const a = m.project(from), b = m.project(hold);
+        // Kept fractional: rounding to whole frames here made the dialog's
+        // small preview glide for a different number of frames than the
+        // export, and so describe a camera nobody was going to get.
+        ease = Math.max(4, Math.min(maxEase, Math.hypot(b.x - a.x, b.y - a.y) / GLIDE_PX));
+        easeAt = f;
+      }
+    }
+
+    let center = hold;
+    if (easeAt >= 0) {
+      const e = (f - easeAt) / ease;
+      if (e >= 1) { easeAt = -1; from = null; }
+      else {
+        const g = easeInOut(e);
+        center = [from[0] + (hold[0] - from[0]) * g, from[1] + (hold[1] - from[1]) * g];
+      }
+    }
+
+    raw.push({
+      center: (plan.mode === 'follow') ? center.slice() : [
+        plan.fit.center[0] + (center[0] - plan.fit.center[0]) * k,
+        plan.fit.center[1] + (center[1] - plan.fit.center[1]) * k,
+      ],
+      zoom,
+    });
   }
 
-  // in / out: blend the wide shot into the close one. k is 0 at the wide end
-  // and 1 at the close end, so `out` is simply `in` run backwards.
-  const k = plan.mode === 'out' ? easeInOut(1 - p) : easeInOut(p);
-  m.jumpTo({ center: [
-    plan.fit.center[0] + (dot[0] - plan.fit.center[0]) * k,
-    plan.fit.center[1] + (dot[1] - plan.fit.center[1]) * k,
-  ] });
-  // Solved after the centre moves, so the latitude is the one being rendered.
-  const close = zoomForWidth(m, plan.metres, w, h);
-  m.jumpTo({ zoom: plan.fit.zoom + (close - plan.fit.zoom) * k });
+  return smoothTrack(raw, cuts, plan.mode === 'whole' ? 0 : 2);
+}
+
+/** Moving average over the centres, reset at each cut. */
+function smoothTrack(raw, cuts, win) {
+  if (win < 1 || raw.length < 3) return raw;
+  const cut = new Set(cuts);
+  const bounds = [];
+  let from = 0;
+  for (let i = 1; i <= raw.length; i++) {
+    if (i === raw.length || cut.has(i)) { bounds.push([from, i]); from = i; }
+  }
+  const out = raw.map(r => ({ center: r.center.slice(), zoom: r.zoom }));
+  for (const [a, b] of bounds) {
+    for (let i = a; i < b; i++) {
+      let lng = 0, lat = 0, n = 0;
+      for (let j = Math.max(a, i - win); j < Math.min(b, i + win + 1); j++) {
+        lng += raw[j].center[0]; lat += raw[j].center[1]; n++;
+      }
+      out[i].center = [lng / n, lat / n];
+    }
+  }
+  return out;
 }
 
 /** One finished frame, composited. Returns the point it was drawn at. */
-async function renderVideoFrame(m, ctx, plan, segs, t, p, w, h, credit) {
+async function renderVideoFrame(m, ctx, cam, segs, t, w, h, credit) {
   const at = atFraction(t);
   if (!at) return null;
-  applyCamera(m, plan, at, p, w, h);
+  m.jumpTo({ center: cam.center, zoom: cam.zoom });
   paintTrail(m, segs, t * anim.total, true);
   await mapIdle(m);
   ctx.drawImage(m.getCanvas(), 0, 0, w, h);
@@ -2721,6 +2814,9 @@ function openVideoModal() {
   $('#vid-status').textContent = '';
   $('#vid-cancel').textContent = 'Cancel';
   $('#video-modal').hidden = false;
+  motion.frames = [];
+  stopMotion();
+  showMotion(false);
   syncCameraControls();
 }
 
@@ -2767,9 +2863,18 @@ function estimateVideo() {
 // export uses. Small, and off the critical path: if it fails, the export is
 // still fine, so nothing here is allowed to throw outward.
 
-const preview = { map: null, host: null, key: '', seq: 0, timer: null };
+const preview = { map: null, host: null, key: '', seq: 0, timer: null, chain: null };
+const motion = { frames: [], playing: false, timer: null, building: false, cancel: false };
+
+/** One offscreen map, one job at a time. */
+function previewWork(fn) {
+  preview.chain = (preview.chain || Promise.resolve()).then(fn).catch(() => {});
+  return preview.chain;
+}
 
 function dropPreviewMap() {
+  stopMotion();
+  motion.frames = [];
   if (preview.map) { try { preview.map.remove(); } catch (e) {} }
   if (preview.host) preview.host.remove();
   preview.map = null; preview.host = null; preview.key = '';
@@ -2777,11 +2882,15 @@ function dropPreviewMap() {
 
 function queuePreview() {
   clearTimeout(preview.timer);
-  preview.timer = setTimeout(() => { renderPreview().catch(() => {}); }, 220);
+  // Any change invalidates a rendered move, so drop it and show the stills.
+  motion.frames = [];
+  stopMotion();
+  showMotion(false);
+  preview.timer = setTimeout(() => { previewWork(renderPreview); }, 220);
 }
 
 async function renderPreview() {
-  if (video.running || $('#vid-go').disabled || $('#video-modal').hidden) return;
+  if (motion.building || video.running || $('#vid-go').disabled || $('#video-modal').hidden) return;
   const seq = ++preview.seq;
   const o = videoOpts();
   const preset = VIDEO_PRESETS[o.preset] || VIDEO_PRESETS.reel;
@@ -2805,18 +2914,153 @@ async function renderPreview() {
     const m = preview.map;
     const plan = cameraPlan(m, o, w, h);
     const credit = creditText();
+    // The ends of the real track, so the stills show the smoothed camera
+    // rather than an idealised one.
+    const frames = Math.max(2, Math.round(o.seconds * o.fps));
+    const track = cameraTrack(m, plan, frames, o.t0, o.t1, w, h);
 
-    for (const [id, t, p] of [['#vid-shot-a', o.t0, 0], ['#vid-shot-b', o.t1, 1]]) {
+    showCameraReport(m, track, w, h);
+
+    for (const [id, t, i] of [['#vid-shot-a', o.t0, 0], ['#vid-shot-b', o.t1, track.length - 1]]) {
       if (seq !== preview.seq) return;
       const cv = $(id);
       cv.width = w; cv.height = h;
       const ctx = cv.getContext('2d', { alpha: false });
-      await renderVideoFrame(m, ctx, plan, segs, t, p, w, h, credit);
+      if (track[i]) await renderVideoFrame(m, ctx, track[i], segs, t, w, h, credit);
     }
   } catch (e) {
     dropPreviewMap();
   } finally {
     if (seq === preview.seq) box.classList.remove('busy');
+  }
+}
+
+/** How still the camera actually is, said plainly under the controls.
+ *  Whether a held camera is even possible depends on how close the framing
+ *  is: at 30 km across a 240 km route the dot crosses the frame eight times,
+ *  so the camera must move eight times. Better to show that than hide it. */
+function showCameraReport(m, track, w, h) {
+  const el = $('#vid-camera-note');
+  if (!el) return;
+  if (track.length < 3) { el.textContent = ''; return; }
+  let still = 0, moves = 0, moving = false;
+  // Proportional, so this preview-sized map reports the clip the export will
+  // actually produce: half a pixel means something quite different at 107 px
+  // wide than at 1080.
+  const stillPx = w * 0.0008;
+  for (let f = 1; f < track.length; f++) {
+    m.jumpTo({ center: track[f].center, zoom: track[f].zoom });
+    const a = m.project(track[f - 1].center), b = m.project(track[f].center);
+    const d = Math.hypot(b.x - a.x, b.y - a.y);
+    if (d < stillPx) { still++; moving = false; }
+    else { if (!moving) moves++; moving = true; }
+  }
+  const pct = Math.round(still / (track.length - 1) * 100);
+  if (!moves) { el.textContent = 'The camera never moves.'; return; }
+  el.innerHTML = `The camera holds still for <b>${pct}%</b> of the clip, ` +
+    `moving ${moves} time${moves === 1 ? '' : 's'}.` +
+    (pct < 45 ? ' <span class="warn">Pull the framing wider for longer holds.</span>' : '');
+}
+
+// ── Video export: previewing the move ────────────────────────
+// Two stills say where the camera starts and stops; they cannot show how it
+// moves between them, which is the part worth checking. This renders the
+// whole move, sampled evenly and small, and loops it — seconds of waiting
+// instead of minutes, for the one question a still cannot answer.
+
+const MOTION_FRAMES = 30, MOTION_FPS = 12;
+
+function showMotion(on) {
+  $('#vid-fig-a').hidden = on;
+  $('#vid-fig-b').hidden = on;
+  $('#vid-fig-m').hidden = !on;
+}
+
+function refreshMotionButton(progress) {
+  const b = $('#vid-play');
+  if (!b) return;
+  b.disabled = !!$('#vid-go').disabled;
+  b.textContent = progress ? `Rendering… ${progress}  (tap to stop)`
+                : motion.playing ? '■ Stop'
+                : motion.frames.length ? '▶ Play it again'
+                : '▶ Preview the move';
+}
+
+function stopMotion() {
+  motion.playing = false;
+  if (motion.timer) { clearInterval(motion.timer); motion.timer = null; }
+  refreshMotionButton();
+}
+
+function playMotion() {
+  if (!motion.frames.length) return;
+  showMotion(true);
+  const cv = $('#vid-motion'), first = motion.frames[0];
+  cv.width = first.width; cv.height = first.height;
+  const ctx = cv.getContext('2d', { alpha: false });
+  let i = 0;
+  if (motion.timer) clearInterval(motion.timer);
+  motion.playing = true;
+  motion.timer = setInterval(() => {
+    ctx.drawImage(motion.frames[i % motion.frames.length], 0, 0);
+    i++;
+  }, 1000 / MOTION_FPS);
+  refreshMotionButton();
+}
+
+function toggleMotion() {
+  if (motion.building) { motion.cancel = true; return; }
+  if (motion.playing) { stopMotion(); return; }
+  if (motion.frames.length) { playMotion(); return; }
+  previewWork(buildMotion);
+}
+
+async function buildMotion() {
+  if ($('#vid-go').disabled || $('#video-modal').hidden) return;
+  motion.building = true;
+  motion.cancel = false;
+  refreshMotionButton('0/' + MOTION_FRAMES);
+  const box = $('#vid-preview');
+  box.classList.add('busy');
+  try {
+    const o = videoOpts();
+    const preset = VIDEO_PRESETS[o.preset] || VIDEO_PRESETS.reel;
+    const scale = 200 / Math.max(preset.w, preset.h);
+    const w = Math.round(preset.w * scale), h = Math.round(preset.h * scale);
+    const segs = trailSegments();
+
+    const key = `${w}x${h}:${state.settings.basemap}`;
+    if (preview.key !== key) {
+      dropPreviewMap();
+      const made = await makeExportMap(w, h, segs);
+      preview.map = made.map; preview.host = made.host; preview.key = key;
+    }
+    const m = preview.map;
+    const plan = cameraPlan(m, o, w, h);
+    const credit = creditText();
+    const track = cameraTrack(m, plan, MOTION_FRAMES, o.t0, o.t1, w, h);
+
+    const built = [];
+    for (let f = 0; f < track.length; f++) {
+      if (motion.cancel) return;
+      const p = track.length > 1 ? f / (track.length - 1) : 0;
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d', { alpha: false });
+      await renderVideoFrame(m, ctx, track[f], segs,
+                             o.t0 + (o.t1 - o.t0) * p, w, h, credit);
+      built.push(cv);
+      refreshMotionButton(`${f + 1}/${track.length}`);
+    }
+    motion.frames = built;
+  } catch (e) {
+    motion.frames = [];
+  } finally {
+    const stopped = motion.cancel;
+    motion.building = false;
+    motion.cancel = false;
+    box.classList.remove('busy');
+    if (motion.frames.length && !stopped) playMotion(); else stopMotion();
   }
 }
 
@@ -2900,14 +3144,17 @@ async function exportVideo(opts, onProgress) {
 
   const t0 = Math.max(0, Math.min(1, opts.t0));
   const t1 = Math.max(t0, Math.min(1, opts.t1));
+  const track = cameraTrack(m, plan, frames, t0, t1, w, h);
   try {
     for (let f = 0; f < frames; f++) {
       if (video.cancel) break;
       if (encodeError) throw encodeError;
 
       const p = f / (frames - 1);
-      const at = await renderVideoFrame(m, ctx, plan, segs, t0 + (t1 - t0) * p,
-                                        p, w, h, credit);
+      const cam = track[f];
+      if (!cam) break;
+      const at = await renderVideoFrame(m, ctx, cam, segs, t0 + (t1 - t0) * p,
+                                        w, h, credit);
       if (!at) break;
 
       const frame = new VideoFrame(cv, {
@@ -3355,6 +3602,7 @@ function wire() {
   // Clicking the backdrop dismisses it, as it does on the other two sheets —
   // but never mid-render, and always through the path that releases the
   // preview's offscreen map.
+  $('#vid-play').onclick = () => toggleMotion();
   $('#video-modal').addEventListener('click', e => {
     if (e.target.id === 'video-modal' && !video.running) closeVideoModal();
   });

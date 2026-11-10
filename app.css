@@ -396,6 +396,10 @@ body.has-scrubber .round-wide { bottom: 66px; }
 .vid-preview.busy canvas { opacity: .55; transition: opacity .15s; }
 #vid-close-row.off { display: none; }
 #vid-close-val { float: right; color: var(--muted); font-size: 11px; }
+#vid-fig-m canvas { max-height: 260px; }
+#vid-play { margin-top: 2px; }
+#vid-play[disabled] { opacity: .6; }
+
 
 
 /* ── Story mode ──────────────────────────────────────────────────── */
