@@ -21,6 +21,7 @@
       <button data-export="publish-map">Share Route Map</button>
       <button data-export="publish-story">Share Story Map</button>
       <hr>
+      <button data-export="video">Animation video (MP4)…</button>
       <button data-export="html">Animated map (HTML file)</button>
       <button data-export="geojson">Route line (GeoJSON)</button>
       <button data-export="gpx">Route line (GPX)</button>
@@ -215,6 +216,41 @@
     <div class="row">
       <button id="share-open" class="ghost">Open it</button>
       <button id="share-close" class="ghost">Done</button>
+    </div>
+  </div>
+</div>
+
+<div id="video-modal" hidden>
+  <div class="sheet">
+    <h2>Export the animation</h2>
+    <p class="hint">
+      Renders the dot travelling the whole joined route, frame by frame, to an
+      MP4. Nothing is uploaded — the encoding happens in this browser.
+    </p>
+    <label>Size
+      <select id="vid-preset"></select>
+    </label>
+    <div class="dates">
+      <label>Length (seconds) <input id="vid-secs" type="number" min="2" max="120" step="1" value="15"></label>
+      <label>Frame rate
+        <select id="vid-fps">
+          <option value="24">24</option>
+          <option value="30" selected>30</option>
+          <option value="60">60</option>
+        </select>
+      </label>
+    </div>
+    <label>Zoom <input id="vid-zoom" type="number" min="1" max="18" step="0.5" placeholder="leave blank to fit the whole route">
+      <span class="hint">The camera holds this zoom and follows the dot.</span>
+    </label>
+    <div id="vid-note" class="report"></div>
+    <div id="vid-progress" class="report" hidden>
+      <div class="bar"><i id="vid-bar"></i></div>
+      <span id="vid-status" class="mono"></span>
+    </div>
+    <div class="row">
+      <button id="vid-go" class="primary">Export</button>
+      <button id="vid-cancel" class="ghost">Cancel</button>
     </div>
   </div>
 </div>

@@ -554,9 +554,10 @@ function pointFeature(pt, props) {
   return { type: 'Feature', properties: props || {},
            geometry: { type: 'Point', coordinates: [pt[1], pt[0]] } };
 }
-function setData(id, data) {
-  if (!map) return;
-  const src = map.getSource(id);
+function setData(id, data, m) {
+  const target = m || map;
+  if (!target) return;
+  const src = target.getSource(id);
   if (src) src.setData(data);
 }
 
@@ -631,7 +632,7 @@ async function initMap() {
   // sidebar, the importer and every other control work meanwhile; the map
   // draws itself when it is finally looked at.
   map.once('load', () => {
-    addMapLayers();
+    addMapLayers(map);
     mapReady = true;
     refreshAll();
     if (state.rides.length) fitAll({ animate: false });
@@ -644,26 +645,26 @@ async function initMap() {
  *  functions never add or remove layers. A layer that always exists is also a
  *  stable anchor for slotting the animation trail in at the right depth.
  */
-function addMapLayers() {
+function addMapLayers(m) {
   ['src-hover', 'src-sel', 'src-rides', 'src-transfers', 'src-draw',
    'src-ends', 'src-sel-caps']
-    .forEach(id => map.addSource(id, { type: 'geojson', data: EMPTY }));
+    .forEach(id => m.addSource(id, { type: 'geojson', data: EMPTY }));
 
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-hover', type: 'line', source: 'src-hover',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '#fff', 'line-width': 6, 'line-opacity': .5 },
   });
 
   // Selection halo. The soft edge is line-blur, which the 2D canvas could not do.
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-sel-glow', type: 'line', source: 'src-sel',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': ['get', 'color'],
              'line-width': SELECT_HALO_WEIGHT, 'line-blur': 3 },
   });
 
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-rides', type: 'line', source: 'src-rides',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
@@ -677,7 +678,7 @@ function addMapLayers() {
   // line-dasharray cannot be data-driven, so each mode gets its own layer.
   // Leaflet measures dashes in pixels; MapLibre counts them in line widths.
   Object.entries(MODES).forEach(([key, st]) => {
-    map.addLayer({
+    m.addLayer({
       id: 'lyr-tr-' + key, type: 'line', source: 'src-transfers',
       filter: ['==', ['get', 'mode'], key],
       layout: { 'line-join': 'round' },
@@ -686,13 +687,13 @@ function addMapLayers() {
     });
   });
 
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-sel-line', type: 'line', source: 'src-sel',
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '#fff', 'line-width': 2.6, 'line-opacity': .95 },
   });
 
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-draw-line', type: 'line', source: 'src-draw',
     filter: ['==', ['geometry-type'], 'LineString'],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
@@ -702,27 +703,29 @@ function addMapLayers() {
 
   // Anchor layer: trail segments are inserted before this one, so the start
   // and end markers stay on top of the moving line.
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-ends', type: 'circle', source: 'src-ends',
     paint: { 'circle-radius': 6, 'circle-color': ['get', 'color'],
              'circle-stroke-width': 1.5, 'circle-stroke-color': '#15150f' },
   });
 
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-sel-caps', type: 'circle', source: 'src-sel-caps',
     paint: { 'circle-radius': 7, 'circle-color': ['get', 'color'],
              'circle-stroke-width': 2, 'circle-stroke-color': '#15150f' },
   });
 
-  map.addLayer({
+  m.addLayer({
     id: 'lyr-draw-pts', type: 'circle', source: 'src-draw',
     filter: ['==', ['geometry-type'], 'Point'],
     paint: { 'circle-radius': 4, 'circle-color': ['get', 'color'],
              'circle-stroke-width': 1.5, 'circle-stroke-color': '#15150f' },
   });
 
-  hoverLabel(['lyr-rides', 'lyr-ends', 'lyr-sel-caps',
-    ...Object.keys(MODES).map(k => 'lyr-tr-' + k)]);
+  if (m === map) {
+    hoverLabel(['lyr-rides', 'lyr-ends', 'lyr-sel-caps',
+      ...Object.keys(MODES).map(k => 'lyr-tr-' + k)]);
+  }
 }
 
 /** Leaflet's bindTooltip, as one shared popup over the named layers.
@@ -828,37 +831,49 @@ const LINE_DARKEN        = 0.55;   // core line, relative to the ride's colour
 const SELECT_HALO_WEIGHT = 13;
 const SELECT_HALO_ALPHA  = 0.55;
 
-function drawRides() {
-  if (!mapReady) return;
+// The route as GeoJSON, with no map involved. The on-screen map and the video
+// exporter both draw the same journey, so the features are built once here and
+// each pushes them into its own sources.
+function ridesFC() {
   const eps = state.settings.simplify;
-
-  setData('src-rides', fc(state.rides.map((ride, i) => lineFeature(
+  return fc(state.rides.map((ride, i) => lineFeature(
     simplify(ride.points, eps), {
       id: ride.id,
       // No halo here — that is the selection cue, drawn by highlightRide for
       // one ride at a time. On every ride at once it was just visual noise.
       color: shade(rideRGB(i, state.rides.length), LINE_DARKEN),
       label: `${ride.date.slice(0, 10)} — ${ride.name} (${fmtKm(ride.dist)} km)`,
-    }))));
+    })));
+}
 
-  const ends = [];
-  if (state.rides.length) {
-    const first = state.rides[0], last = state.rides[state.rides.length - 1];
-    ends.push(pointFeature(first.points[0], {
-      color: '#8fbf6f', label: `Start — ${first.date.slice(0, 10)}` }));
-    ends.push(pointFeature(last.points[last.points.length - 1], {
-      color: state.settings.brand, label: `Latest — ${last.date.slice(0, 10)}` }));
-  }
-  setData('src-ends', fc(ends));
+function transfersFC() {
+  return fc(state.transfers.map(t => {
+    const st = MODES[t.mode] || MODES.other;
+    return lineFeature(t.points, { mode: MODES[t.mode] ? t.mode : 'other',
+                                   label: t.label || st.label });
+  }));
+}
+
+function endsFC() {
+  if (!state.rides.length) return EMPTY;
+  const first = state.rides[0], last = state.rides[state.rides.length - 1];
+  return fc([
+    pointFeature(first.points[0], {
+      color: '#8fbf6f', label: `Start — ${first.date.slice(0, 10)}` }),
+    pointFeature(last.points[last.points.length - 1], {
+      color: state.settings.brand, label: `Latest — ${last.date.slice(0, 10)}` }),
+  ]);
+}
+
+function drawRides() {
+  if (!mapReady) return;
+  setData('src-rides', ridesFC());
+  setData('src-ends', endsFC());
 }
 
 function drawTransfers() {
   if (!mapReady) return;
-  setData('src-transfers', fc(state.transfers.map(t => {
-    const st = MODES[t.mode] || MODES.other;
-    return lineFeature(t.points, { mode: MODES[t.mode] ? t.mode : 'other',
-                                   label: t.label || st.label });
-  })));
+  setData('src-transfers', transfersFC());
 }
 
 function fitAll(opts) {
@@ -1028,35 +1043,57 @@ function buildTrailLayers() {
     if (map.getLayer('lyr-' + id)) map.removeLayer('lyr-' + id);
     if (map.getSource('src-' + id)) map.removeSource('src-' + id);
   });
-  anim.trailIds = [];
-  anim.segs = [];
+  anim.segs = trailSegments();
+  anim.trailIds = anim.segs.map((_, i) => 'trail-' + i);
+  addTrailLayers(map, anim.segs, 'lyr-ends');
+}
 
+/** The animated path cut at its run boundaries, with the distance each run
+ *  spans. Pure — reads anim, touches no map, so the exporter can reuse it. */
+function trailSegments() {
+  const segs = [];
   const pts = anim.path;
-  if (pts.length < 2) return;
-
+  if (pts.length < 2) return segs;
   let start = 0;
   const flush = (end) => {
-    if (end - start >= 2) anim.segs.push({ i0: start, i1: end - 1 });
+    if (end - start >= 2) segs.push({ i0: start, i1: end - 1 });
     start = end;
   };
   for (let i = 1; i < pts.length; i++) if (anim.breaks.has(i)) flush(i);
   flush(pts.length);
+  segs.forEach(seg => { seg.d0 = anim.cum[seg.i0]; seg.d1 = anim.cum[seg.i1]; });
+  return segs;
+}
 
-  anim.segs.forEach((seg, i) => {
+/** One GL line per run on `m`, uploaded once and revealed by gradient. */
+function addTrailLayers(m, segs, before) {
+  segs.forEach((seg, i) => {
     const id = 'trail-' + i;
-    anim.trailIds.push(id);
-    seg.d0 = anim.cum[seg.i0];
-    seg.d1 = anim.cum[seg.i1];
-    map.addSource('src-' + id, {
+    m.addSource('src-' + id, {
       type: 'geojson',
       lineMetrics: true,                 // required for line-gradient
-      data: lineFeature(pts.slice(seg.i0, seg.i1 + 1), {}),
+      data: lineFeature(anim.path.slice(seg.i0, seg.i1 + 1), {}),
     });
-    map.addLayer({
+    m.addLayer({
       id: 'lyr-' + id, type: 'line', source: 'src-' + id,
       layout: { 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-width': 4, 'line-opacity': 0 },
-    }, 'lyr-ends');
+    }, before);
+  });
+}
+
+/** Reveal the trail on `m` up to `done` km along the path. */
+function paintTrail(m, segs, done, show) {
+  segs.forEach((seg, i) => {
+    const id = 'lyr-trail-' + i;
+    if (!m.getLayer(id)) return;
+    if (!show) { m.setPaintProperty(id, 'line-opacity', 0); return; }
+    const span = seg.d1 - seg.d0;
+    const f = span <= 0 ? (done >= seg.d1 ? 1 : 0)
+                        : Math.min(1, Math.max(0, (done - seg.d0) / span));
+    if (f <= 0) { m.setPaintProperty(id, 'line-opacity', 0); return; }
+    m.setPaintProperty(id, 'line-opacity', .95);
+    m.setPaintProperty(id, 'line-gradient', trailGradient(f, state.settings.brand));
   });
 }
 
@@ -1159,19 +1196,8 @@ function renderAnim() {
   anim.dot.getElement().style.background = state.settings.brand;
   anim.dot.setLngLat([at.pos[1], at.pos[0]]);
 
-  const drawTrail = $('#trail').value === 'draw';
   const done = anim.t * anim.total;
-  anim.segs.forEach((seg, i) => {
-    const id = 'lyr-trail-' + i;
-    if (!map.getLayer(id)) return;
-    if (!drawTrail) { map.setPaintProperty(id, 'line-opacity', 0); return; }
-    const span = seg.d1 - seg.d0;
-    const f = span <= 0 ? (done >= seg.d1 ? 1 : 0)
-                        : Math.min(1, Math.max(0, (done - seg.d0) / span));
-    if (f <= 0) { map.setPaintProperty(id, 'line-opacity', 0); return; }
-    map.setPaintProperty(id, 'line-opacity', .95);
-    map.setPaintProperty(id, 'line-gradient', trailGradient(f, state.settings.brand));
-  });
+  paintTrail(map, anim.segs, done, $('#trail').value === 'draw');
 
   if ($('#follow').checked) map.jumpTo({ center: [at.pos[1], at.pos[0]] });
 
@@ -1427,7 +1453,9 @@ function load(data) {
 
 // ── Export ──────────────────────────────────────────────────────────────────
 function download(name, text, type) {
-  const blob = new Blob([text], { type: type || 'application/octet-stream' });
+  const blob = text instanceof Blob
+    ? text
+    : new Blob([text], { type: type || 'application/octet-stream' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = name;
@@ -1685,6 +1713,7 @@ function build(map){
 function doExport(kind) {
   if (kind === 'publish-map')   { publish(false); return; }
   if (kind === 'publish-story') { publish(true); return; }
+  if (kind === 'video')   { openVideoModal(); return; }
   const safe = state.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'journey';
   if (!state.rides.length && kind !== 'project') { toast('Add some rides first', true); return; }
   if (kind === 'geojson') download(safe + '-route.geojson', JSON.stringify(runsGeoJSON()), 'application/geo+json');
@@ -2384,6 +2413,327 @@ function lockMap(locked) {
   if (!locked && map.touchZoomRotate) map.touchZoomRotate.disableRotation();
 }
 
+// ── Video export ────────────────────────────────────────────────────────────
+// Frames are rendered one at a time into an offscreen map, not screen-recorded.
+// captureStream + MediaRecorder would be real time, would bake in every
+// half-loaded tile the camera flew through, and would capture only the map
+// canvas — the overlays and the dot are not on it. Rendering frame by frame
+// means waiting for `idle` before reading each one, so every frame is complete
+// whatever the network did, and the clip takes as long as it takes.
+//
+// This is feasible only because the animation is a pure function of anim.t:
+// there is no clock to outrun, so any frame can be produced on demand.
+
+const VIDEO_PRESETS = {
+  reel:      { label: 'Reel / Story — 1080 × 1920', w: 1080, h: 1920 },
+  landscape: { label: 'Landscape — 1920 × 1080',    w: 1920, h: 1080 },
+  square:    { label: 'Square — 1080 × 1080',       w: 1080, h: 1080 },
+};
+
+const MUXER_URL = 'https://unpkg.com/mp4-muxer@5.2.2/build/mp4-muxer.js';
+
+const video = { running: false, cancel: false };
+
+function loadScriptOnce(url) {
+  loadScriptOnce.seen = loadScriptOnce.seen || {};
+  if (!loadScriptOnce.seen[url]) {
+    loadScriptOnce.seen[url] = new Promise((res, rej) => {
+      const el = document.createElement('script');
+      el.src = url;
+      el.onload = () => res();
+      el.onerror = () => { delete loadScriptOnce.seen[url]; rej(new Error('could not load ' + url)); };
+      document.head.appendChild(el);
+    });
+  }
+  return loadScriptOnce.seen[url];
+}
+
+/** Null if this browser can encode video, otherwise why not. */
+function videoBlocker() {
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
+    return 'This browser cannot encode video. Chrome, Edge, Safari 16.4+ or ' +
+           'Firefox 130+ support the WebCodecs encoder this needs.';
+  }
+  return null;
+}
+
+/** First H.264 profile the browser will actually encode at this size.
+ *  High, then Main, then Baseline — hardware support varies by machine, and
+ *  a configure() on an unsupported profile throws rather than degrading. */
+async function pickVideoConfig(w, h, fps) {
+  const bitrate = Math.min(28e6, Math.round(w * h * fps * 0.11));
+  for (const codec of ['avc1.640028', 'avc1.4d0028', 'avc1.42001f']) {
+    const cfg = { codec, width: w, height: h, bitrate, framerate: fps };
+    try {
+      const probe = await VideoEncoder.isConfigSupported(cfg);
+      if (probe && probe.supported) return cfg;
+    } catch (e) { /* try the next profile */ }
+  }
+  return null;
+}
+
+/** Resolve once `m` has finished drawing, or once we have waited long enough.
+ *  Without this the frame is read mid tile-load and the video shows the gaps. */
+function mapIdle(m, ms) {
+  return new Promise(res => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      m.off('idle', done);
+      clearTimeout(timer);
+      res();
+    };
+    const timer = setTimeout(done, ms || 2500);
+    m.on('idle', done);
+  });
+}
+
+/** A map sized to the output, off screen, carrying the same journey. */
+async function makeExportMap(w, h, segs) {
+  const host = document.createElement('div');
+  host.style.cssText =
+    'position:fixed;left:-20000px;top:0;pointer-events:none;' +
+    'width:' + w + 'px;height:' + h + 'px;';
+  document.body.appendChild(host);
+
+  const bm = BASEMAPS[state.settings.basemap] || BASEMAPS[Object.keys(BASEMAPS)[0]];
+  const m = new maplibregl.Map({
+    container: host,
+    style: await loadStyle(bm),
+    center: [6, 46], zoom: 4,
+    interactive: false,
+    attributionControl: false,   // redrawn into the frame instead, see credit()
+    preserveDrawingBuffer: true, // required to read the canvas back
+    pixelRatio: 1,               // the container is already at output size
+    fadeDuration: 0,             // no label caught half faded-in in a still
+  });
+
+  await new Promise(res => m.once('load', res));
+  addMapLayers(m);
+  setData('src-rides', ridesFC(), m);
+  setData('src-transfers', transfersFC(), m);
+  setData('src-ends', endsFC(), m);
+  addTrailLayers(m, segs, 'lyr-ends');
+  return { map: m, host };
+}
+
+/** Basemap credit as plain text. It is a licence condition, so it is drawn
+ *  into every frame rather than offered as something to switch off. */
+function creditText() {
+  const bm = BASEMAPS[state.settings.basemap] || BASEMAPS[Object.keys(BASEMAPS)[0]];
+  return String(bm.attribution || OSM_ATTRIB)
+    .replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function drawCredit(ctx, w, h, text) {
+  const pad = Math.round(Math.min(w, h) * 0.014);
+  ctx.font = Math.round(Math.min(w, h) * 0.018) + 'px system-ui, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  const tw = ctx.measureText(text).width;
+  const fh = Math.round(Math.min(w, h) * 0.018);
+  ctx.fillStyle = 'rgba(12,12,9,.55)';
+  ctx.fillRect(w - tw - pad * 2.2, h - fh - pad * 1.9, tw + pad * 1.6, fh + pad * 1.2);
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  ctx.fillText(text, w - pad * 1.4, h - pad * 1.2);
+}
+
+function drawDot(ctx, m, pos, w, h) {
+  const p = m.project([pos[1], pos[0]]);
+  const r = Math.max(6, Math.round(Math.min(w, h) * 0.011));
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  ctx.fillStyle = state.settings.brand;
+  ctx.fill();
+  ctx.lineWidth = Math.max(2, Math.round(r * 0.34));
+  ctx.strokeStyle = '#fff';
+  ctx.stroke();
+}
+
+// ── Video export: the dialog ────────────────────────────────────────────────
+
+function openVideoModal() {
+  const sel = $('#vid-preset');
+  if (!sel.options.length) {
+    sel.innerHTML = Object.entries(VIDEO_PRESETS)
+      .map(([k, v]) => `<option value="${k}">${escapeHTML(v.label)}</option>`).join('');
+  }
+  prepareAnim();
+
+  const note = $('#vid-note');
+  const blocked = videoBlocker();
+  if (blocked) {
+    note.innerHTML = `<span class="warn">${escapeHTML(blocked)}</span>`;
+  } else if (anim.path.length < 2) {
+    note.innerHTML = '<span class="warn">Add some rides first — there is no ' +
+                     'route to animate yet.</span>';
+  } else {
+    note.textContent = '';
+  }
+  $('#vid-go').disabled = !!blocked || anim.path.length < 2;
+
+  $('#vid-progress').hidden = true;
+  $('#vid-bar').style.width = '0%';
+  $('#vid-status').textContent = '';
+  $('#vid-cancel').textContent = 'Cancel';
+  $('#video-modal').hidden = false;
+  estimateVideo();
+}
+
+function fmtClock(secs) {
+  secs = Math.max(0, Math.round(secs));
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return m ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`;
+}
+
+/** Say up front how long this will take. A clip of any length is minutes of
+ *  rendering, and the per-frame cost is dominated by waiting for tiles, not
+ *  by encoding — measured at 0.12 s a frame warm, 0.4 s cold. */
+function estimateVideo() {
+  if ($('#vid-go').disabled) return;
+  const fps = +$('#vid-fps').value;
+  const secs = Math.max(2, Math.min(120, +$('#vid-secs').value || 15));
+  const frames = Math.round(secs * fps);
+  $('#vid-note').innerHTML =
+    `${frames.toLocaleString()} frames, so roughly ` +
+    `<b>${fmtClock(frames * 0.12)}–${fmtClock(frames * 0.4)}</b> to render. ` +
+    `Leave this tab in front — browsers throttle background tabs and the ` +
+    `render stalls.`;
+}
+
+async function runVideoExport() {
+  const opts = {
+    preset: $('#vid-preset').value,
+    fps: +$('#vid-fps').value,
+    seconds: Math.max(2, Math.min(120, +$('#vid-secs').value || 15)),
+    zoom: parseFloat($('#vid-zoom').value),
+  };
+
+  video.running = true;
+  video.cancel = false;
+  $('#vid-go').disabled = true;
+  $('#vid-cancel').textContent = 'Stop';
+  $('#vid-progress').hidden = false;
+  $('#vid-note').textContent = '';
+
+  const started = Date.now();
+  const onProgress = (done, total) => {
+    $('#vid-bar').style.width = (done / total * 100).toFixed(1) + '%';
+    const per = (Date.now() - started) / done;
+    const left = Math.round((total - done) * per / 1000);
+    $('#vid-status').textContent =
+      `${done}/${total}` + (done > 4 ? ` · ${fmtDuration(left)} left` : '');
+  };
+
+  try {
+    const blob = await exportVideo(opts, onProgress);
+    if (!blob) { toast('Export stopped'); return; }
+    const safe = state.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'journey';
+    download(safe + '-animation.mp4', blob, 'video/mp4');
+    $('#video-modal').hidden = true;
+    toast(`Saved ${(blob.size / 1e6).toFixed(1)} MB of MP4`);
+  } catch (e) {
+    $('#vid-note').innerHTML = `<span class="warn">${escapeHTML(e.message || String(e))}</span>`;
+  } finally {
+    video.running = false;
+    video.cancel = false;
+    $('#vid-go').disabled = false;
+    $('#vid-cancel').textContent = 'Cancel';
+    $('#vid-progress').hidden = true;
+  }
+}
+
+/** Render the animation to an MP4 and hand it over as a download. */
+async function exportVideo(opts, onProgress) {
+  const blocked = videoBlocker();
+  if (blocked) throw new Error(blocked);
+  if (anim.path.length < 2) throw new Error('nothing to animate yet');
+
+  const preset = VIDEO_PRESETS[opts.preset] || VIDEO_PRESETS.reel;
+  const w = preset.w, h = preset.h, fps = opts.fps;
+  const frames = Math.max(2, Math.round(opts.seconds * fps));
+
+  const cfg = await pickVideoConfig(w, h, fps);
+  if (!cfg) throw new Error('this browser will not encode H.264 at ' + w + '×' + h);
+
+  await loadScriptOnce(MUXER_URL);
+  if (typeof Mp4Muxer === 'undefined') throw new Error('the MP4 muxer did not load');
+
+  const segs = trailSegments();
+  const made = await makeExportMap(w, h, segs);
+  const m = made.map;
+
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d', { alpha: false });
+  const credit = creditText();
+
+  // No zoom given means "show the whole thing": fit the route at the output's
+  // own aspect ratio, which is not the one on screen.
+  let zoom = opts.zoom;
+  if (!(zoom > 0)) {
+    const b = boundsOf(anim.path);
+    const cam = b && m.cameraForBounds(b, { padding: Math.round(Math.min(w, h) * 0.08) });
+    zoom = cam ? cam.zoom : 6;
+  }
+
+  const muxer = new Mp4Muxer.Muxer({
+    target: new Mp4Muxer.ArrayBufferTarget(),
+    video: { codec: 'avc', width: w, height: h, frameRate: fps },
+    fastStart: 'in-memory',
+  });
+  let encodeError = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: e => { encodeError = e; },
+  });
+  encoder.configure(cfg);
+
+  const t0 = 0, t1 = 1;
+  try {
+    for (let f = 0; f < frames; f++) {
+      if (video.cancel) break;
+      if (encodeError) throw encodeError;
+
+      const t = t0 + (t1 - t0) * (f / (frames - 1));
+      const at = atFraction(t);
+      if (!at) break;
+
+      m.jumpTo({ center: [at.pos[1], at.pos[0]], zoom });
+      paintTrail(m, segs, t * anim.total, true);
+      await mapIdle(m);
+
+      ctx.drawImage(m.getCanvas(), 0, 0, w, h);
+      drawDot(ctx, m, at.pos, w, h);
+      drawCredit(ctx, w, h, credit);
+
+      const frame = new VideoFrame(cv, {
+        timestamp: Math.round(f * 1e6 / fps),
+        duration: Math.round(1e6 / fps),
+      });
+      // A keyframe every couple of seconds keeps the file seekable.
+      encoder.encode(frame, { keyFrame: f % (fps * 2) === 0 });
+      frame.close();
+
+      // Never let the encoder fall far behind: each queued frame is a full
+      // uncompressed 1080p surface, and a few hundred of them is gigabytes.
+      while (encoder.encodeQueueSize > 8) await new Promise(r => setTimeout(r, 4));
+      if (onProgress) onProgress(f + 1, frames);
+    }
+
+    if (video.cancel) { encoder.close(); return null; }
+    await encoder.flush();
+    if (encodeError) throw encodeError;
+    muxer.finalize();
+    return new Blob([muxer.target.buffer], { type: 'video/mp4' });
+  } finally {
+    try { if (encoder.state !== 'closed') encoder.close(); } catch (e) {}
+    m.remove();
+    made.host.remove();
+  }
+}
+
 // ── Publishing ──────────────────────────────────────────────────────────────
 // A published map is one Firestore document: the project, gzipped and
 // base64'd, under the 1 MiB document ceiling. No SDK — the REST API is two
@@ -2793,6 +3143,17 @@ function wire() {
   };
   window.addEventListener('resize', onViewportChange);
   window.addEventListener('orientationchange', onViewportChange);
+
+  // Video export
+  $('#vid-go').onclick = () => { if (!video.running) runVideoExport(); };
+  $('#vid-cancel').onclick = () => {
+    if (video.running) { video.cancel = true; $('#vid-status').textContent = 'stopping…'; }
+    else $('#video-modal').hidden = true;
+  };
+  ['#vid-secs', '#vid-fps'].forEach(sel => {
+    $(sel).addEventListener('input', estimateVideo);
+    $(sel).addEventListener('change', estimateVideo);
+  });
 
   // Export menu
   const menu = $('#export-menu');

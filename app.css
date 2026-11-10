@@ -258,16 +258,23 @@ body.viewing main { height: 100dvh; }
 .viewer-link:hover { text-decoration: underline; }
 
 /* ── Share sheet ─────────────────────────────────────────────────── */
-#share-modal {
+#share-modal, #video-modal {
   position: fixed; inset: 0; z-index: 4000; display: grid; place-items: center;
-  background: rgba(0,0,0,.6);
+  background: rgba(0,0,0,.6); padding: 16px;
 }
-#share-modal .sheet {
+/* Shared by every dialog, so a new one only has to supply its contents. */
+.sheet {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 11px; padding: 20px 22px; width: min(480px, calc(100% - 36px));
   box-shadow: 0 14px 44px rgba(0,0,0,.6);
+  max-height: 88vh; overflow-y: auto;
 }
-#share-modal h2 { margin: 0 0 7px; font-size: 16px; }
+.sheet h2 { margin: 0 0 7px; font-size: 16px; }
+.sheet select, .sheet input[type="number"] {
+  display: block; width: 100%; margin-top: 4px; padding: 7px 9px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius); color: var(--text); font: inherit;
+}
 .share-row { display: flex; gap: 8px; margin-top: 12px; }
 #share-url {
   flex: 1; padding: 8px 10px; font-size: 12px;
@@ -323,7 +330,7 @@ body.has-scrubber .round-wide { bottom: 66px; }
   position: fixed; inset: 0; z-index: 4000; display: grid; place-items: center;
   background: rgba(0,0,0,.6); padding: 16px; overflow-y: auto;
 }
-.wide-sheet { width: min(560px, 100%); max-height: 88vh; overflow-y: auto; }
+.wide-sheet { width: min(560px, 100%); }
 .wide-sheet textarea {
   display: block; width: 100%; margin-top: 4px; padding: 8px 10px;
   background: var(--panel-2); border: 1px solid var(--line);
@@ -354,6 +361,20 @@ body.has-scrubber .round-wide { bottom: 66px; }
 #ch-photos .p-state { color: var(--muted); font-size: 10px; }
 #ch-photos .p-state.bad { color: var(--danger); }
 .list li .grip { color: var(--muted); cursor: grab; flex: 0 0 auto; }
+
+/* ── Video export ─────────────────────────────────── */
+#vid-progress { display: flex; align-items: center; gap: 10px; }
+#vid-progress .bar {
+  flex: 1 1 auto; height: 6px; border-radius: 3px;
+  background: var(--panel-2); overflow: hidden;
+}
+#vid-progress .bar i {
+  display: block; height: 100%; width: 0;
+  background: var(--accent, #FF6B35); transition: width .15s linear;
+}
+#video-modal .dates { display: flex; gap: 10px; }
+#video-modal .dates label { flex: 1 1 0; min-width: 0; }
+#vid-status { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
 
 /* ── Story mode ──────────────────────────────────────────────────── */
 body.story #panel, body.story #topbar { display: none; }
