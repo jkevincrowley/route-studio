@@ -2202,10 +2202,14 @@ function openStory() {
 
   document.body.classList.add('story');
   $('#story').hidden = false;
+  lockMap(true);
+  syncStoryLine();
   resizeMap();
   wrap.scrollTop = 0;
   wrap.addEventListener('scroll', onStoryScroll, { passive: true });
-  onStoryScroll();
+  // resizeMap defers to the next frame, and the first chapter is framed
+  // against the canvas size, so wait for that to land before measuring.
+  requestAnimationFrame(() => requestAnimationFrame(onStoryScroll));
 }
 
 function closeStory() {
@@ -2214,6 +2218,7 @@ function closeStory() {
   document.body.classList.remove('story');
   $('#story').hidden = true;
   story.cards = [];
+  lockMap(false);
   resizeMap();
   if (state.rides.length) fitAll();
 }
@@ -2232,7 +2237,7 @@ function onStoryScroll() {
     const wrap = $('#story-scroll');
     if (!story.cards.length) return;
 
-    const line = wrap.scrollTop + wrap.clientHeight * 0.34;
+    const line = wrap.scrollTop + wrap.clientHeight * storyLine();
     let idx = 0;
     for (let i = 0; i < story.cards.length; i++) {
       if (story.cards[i].offsetTop <= line) idx = i;
@@ -2245,27 +2250,100 @@ function onStoryScroll() {
     if (idx !== story.active) {
       story.cards.forEach((c, i) => c.classList.toggle('live', i === idx));
       story.active = idx;
+      // The camera moves once per chapter, not once per frame. Framing the
+      // chapter's own extent is what puts the reader at the scale of the
+      // section being described, and because the whole of it is in view the
+      // dot never needs chasing — the sense of movement comes from the trail
+      // drawing itself, over a camera that holds still enough to read against.
+      frameChapter(idx);
     }
     if (!span) return;
 
     anim.t = span.t0 + (span.t1 - span.t0) * progress;
     renderAnim();
-
-    const at = atFraction(anim.t);
-    if (at) {
-      // Keep the moving dot clear of the narrative column.
-      const narrow = window.innerWidth <= 760;
-      const offset = narrow ? [0, -wrap.clientHeight / 3]
-                            : [wrap.clientWidth / 2, 0];
-      // easeTo places the given centre `offset` pixels from the container
-      // centre, which is exactly the shift the narrative column needs — the
-      // manual project/unproject round trip is gone.
-      map.easeTo({
-        center: [at.pos[1], at.pos[0]], offset,
-        duration: 500, essential: true,
-      });
-    }
   });
+}
+
+/** Where down the screen a chapter becomes the live one.
+ *
+ *  The card is pinned at exactly this height (CSS reads it back as
+ *  --story-line), and the two have to agree. A card pinned anywhere else
+ *  slides out of view part-way through its own chapter: its sticky box is
+ *  only pinned while its parent still covers the offset, and the parent only
+ *  covers it for the whole chapter when offset and trigger line coincide.
+ *  Low on a phone: padding can only exclude a rectangle, so everything below
+ *  the card's top edge is lost to the framing whether the card covers it or
+ *  not. The nearer the card sits to the bottom, the more map is left.
+ */
+function storyLine() { return window.innerWidth <= 760 ? .58 : .30; }
+
+function syncStoryLine() {
+  const wrap = $('#story-scroll');
+  if (!wrap) return;
+  wrap.style.setProperty('--story-line',
+    Math.round(wrap.clientHeight * storyLine()) + 'px');
+}
+
+/** How much of the map the narrative card is sitting on top of.
+ *
+ *  Measured from the live card rather than assumed, because the column is a
+ *  left-hand strip on a wide screen and a bottom slab on a phone. Clamped
+ *  well inside the canvas: padding larger than the viewport makes fitBounds
+ *  pick nonsense.
+ */
+function storyPadding() {
+  const pad = { top: 28, bottom: 28, left: 28, right: 28 };
+  const inner = $('#story-scroll .chapter-card.live .ch-inner') ||
+                $('#story-scroll .ch-inner');
+  if (!map || !inner) return pad;
+  const box = inner.getBoundingClientRect();
+  const canvas = map.getCanvas().getBoundingClientRect();
+  const clamp = (v, max) => Math.max(28, Math.min(v, max * .62));
+  if (window.innerWidth <= 760) {
+    pad.bottom = clamp(canvas.bottom - box.top + 20, canvas.height);
+  } else {
+    pad.left = clamp(box.right - canvas.left + 20, canvas.width);
+  }
+  return pad;
+}
+
+/** Fly to the stretch of route one chapter covers. */
+function frameChapter(i) {
+  if (!mapReady) return;
+  const sp = story.spans[i];
+  if (!sp || !sp.rides.length) return;
+  const eps = Math.max(state.settings.simplify, 25);
+  const pts = [];
+  sp.rides.forEach(r => {
+    const simp = simplify(r.points, eps);
+    for (let k = 0; k < simp.length; k++) pts.push(simp[k]);
+  });
+  const b = boundsOf(pts);
+  if (!b) return;
+  map.fitBounds(b, {
+    padding: storyPadding(),
+    maxZoom: 14,              // a short chapter gets real detail
+    duration: 1100,
+    essential: true,
+  });
+}
+
+// Everything that would otherwise let a reader move the map themselves.
+const MAP_HANDLERS = ['dragPan', 'scrollZoom', 'boxZoom', 'dragRotate',
+                      'keyboard', 'doubleClickZoom', 'touchZoomRotate', 'touchPitch'];
+
+/** In story mode the scroll position *is* the camera, so nothing else may
+ *  drive it. The scroll layer already covers the map and swallows pointer
+ *  events; this also closes the keyboard and trackpad routes into it. */
+function lockMap(locked) {
+  if (!map) return;
+  MAP_HANDLERS.forEach(name => {
+    const h = map[name];
+    if (!h) return;
+    if (locked) h.disable(); else h.enable();
+  });
+  // enable() on touchZoomRotate brings rotation back with it.
+  if (!locked && map.touchZoomRotate) map.touchZoomRotate.disableRotation();
 }
 
 // ── Publishing ──────────────────────────────────────────────────────────────
@@ -2652,6 +2730,10 @@ function wire() {
   let profileRedraw;
   const onViewportChange = () => {
     resizeMap();
+    // The pinning offset is a pixel value derived from the viewport height,
+    // and the breakpoint moves it, so it has to be recomputed on a rotate.
+    syncStoryLine();
+    if (!$('#story').hidden) onStoryScroll();
     // Axis ticks are laid out in pixels, so the plot has to be redrawn.
     clearTimeout(profileRedraw);
     profileRedraw = setTimeout(() => { if (!$('#profile').hidden) renderProfile(); }, 120);

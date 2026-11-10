@@ -366,12 +366,15 @@ body.story .maplibregl-ctrl-top-left { display: none; }
 #story {
   position: absolute; inset: 0; z-index: 1500; pointer-events: none;
 }
-/* The column carries no surface of its own — each chapter floats as its
-   own panel and the map runs unbroken behind and between them. */
+/* The scroll layer covers the whole map, so a scroll started anywhere on
+   screen moves the story — and nothing underneath it can be dragged or
+   zoomed by hand. It carries no surface of its own: each chapter floats as
+   its own panel and the map runs unbroken behind and between them. */
 #story-scroll {
-  position: absolute; top: 0; bottom: 0; left: 0;
-  width: min(430px, 42vw); overflow-y: auto; pointer-events: auto;
+  position: absolute; inset: 0;
+  overflow-y: auto; pointer-events: auto;
   scroll-behavior: auto;
+  overscroll-behavior: contain;       /* don't hand the scroll to the page */
   scrollbar-width: none;              /* the cards are the only furniture */
 }
 #story-scroll::-webkit-scrollbar { width: 0; height: 0; }
@@ -386,12 +389,26 @@ body.story .maplibregl-ctrl-top-left { display: none; }
 }
 /* The article is the scroll-pacing unit and stays invisible; .ch-inner is
    the panel you actually see, centred in that span so it floats. */
+/* Full width now that the layer spans the map, so the card itself keeps the
+   column: a capped width held to the left, with the framed route beside it.
+   The panel is sticky, which is what makes the layout prescriptive — it holds
+   still while you read a chapter instead of sliding past, and because its
+   position is then predictable the map can be framed around it. A card that
+   drifts with the scroll cannot be padded against. */
+/* Exactly one chapter is on screen at a time. Cards are taller than the
+   offset they pin at, so neighbours overlap in the scroll — fading the rest
+   out completely is what keeps this one thing to read rather than two
+   half-legible panels stacked over the same piece of map. */
 .chapter-card {
-  min-height: 86vh; display: flex; align-items: center;
-  padding: 7vh 20px;
-  opacity: .45; transition: opacity .4s ease;
+  min-height: 86vh; padding: 7vh 20px;
+  opacity: 0; transition: opacity .45s ease;
+  pointer-events: none;
 }
-.chapter-card.live { opacity: 1; }
+.chapter-card > .ch-inner {
+  position: sticky; top: var(--story-line, 30vh);
+  max-width: min(410px, 40vw);
+}
+.chapter-card.live { opacity: 1; pointer-events: auto; }
 /* Light glass, not dark: the basemap is pale, so a dark panel over it reads
    as a slab laid on top. Pale translucency lets the map tint the card and
    the two stop looking like separate layers. The rest of the app stays dark,
@@ -406,8 +423,6 @@ body.story .maplibregl-ctrl-top-left { display: none; }
   box-shadow: 0 8px 22px rgba(28, 32, 24, .14);
   transition: background-color .4s ease, box-shadow .4s ease;
 }
-/* Fading alone barely separates a pale card from a pale map, so the live
-   chapter also sits more solidly and lifts further off the surface. */
 .chapter-card.live .ch-inner {
   background: rgba(250, 249, 245, .85);
   box-shadow: 0 18px 44px rgba(28, 32, 24, .26);
@@ -433,7 +448,7 @@ body.story .maplibregl-ctrl-top-left { display: none; }
 }
 .chapter-card .broken-photo b { color: #23261e; font-size: 12px; }
 .chapter-card .broken-photo span { word-break: break-all; }
-.story-end { display: flex; justify-content: center; padding: 18vh 20px 24vh; }
+.story-end { display: flex; padding: 18vh 20px 24vh; }
 .story-end span {
   padding: 9px 16px; border-radius: 999px; color: #666b5c; font-size: 12px;
   background: rgba(250, 249, 245, .76);
@@ -443,15 +458,10 @@ body.story .maplibregl-ctrl-top-left { display: none; }
 }
 
 @media (max-width: 760px) {
-  /* The column is a band across the bottom, so a card crossing its top
-     edge gets sliced — often straight through a heading. Fade the top
-     instead of cutting it, so the band reads as depth rather than damage. */
-  #story-scroll {
-    width: 100%; top: auto; height: 62dvh; bottom: 0;
-    mask-image: linear-gradient(to bottom, transparent 0, #000 9%, #000 100%);
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 9%, #000 100%);
-  }
-  .chapter-card { min-height: 52dvh; padding: 3vh 14px 5vh; }
+  /* No room for a side column, so the card sticks to the bottom instead and
+     the framed route gets the space above it. */
+  .chapter-card { min-height: 78dvh; padding: 4vh 14px 6vh; }
+  .chapter-card > .ch-inner { max-width: none; }
   .chapter-card h2 { font-size: 19px; }
   .ch-inner { padding: 16px 17px; border-radius: 14px; }
 }
