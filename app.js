@@ -1900,12 +1900,13 @@ function openStory() {
     const photos = (ch.photos || []).map(p =>
       `<figure><img src="${escapeHTML(p.url)}" alt="${escapeHTML(p.caption || '')}" loading="lazy">` +
       (p.caption ? `<figcaption>${escapeHTML(p.caption)}</figcaption>` : '') + `</figure>`).join('');
-    return `<article class="chapter-card" data-i="${i}">` +
+    return `<article class="chapter-card" data-i="${i}"><div class="ch-inner">` +
            `<h2>${escapeHTML(ch.title)}</h2>` +
            `<div class="ch-meta">${escapeHTML(meta)}</div>` +
            (ch.text ? `<p>${escapeHTML(ch.text)}</p>` : '') +
-           photos + `</article>`;
-  }).join('') + `<div class="story-end">End of the journey — ${escapeHTML(state.name)}</div>`;
+           photos + `</div></article>`;
+  }).join('') +
+  `<div class="story-end"><span>End of the journey — ${escapeHTML(state.name)}</span></div>`;
 
   story.cards = Array.from(wrap.querySelectorAll('.chapter-card'));
 

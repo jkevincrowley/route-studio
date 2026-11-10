@@ -333,47 +333,92 @@ body.story #profile, body.story #p-show, body.story #scrubber { display: none !i
 #story {
   position: absolute; inset: 0; z-index: 1500; pointer-events: none;
 }
+/* The column carries no surface of its own — each chapter floats as its
+   own panel and the map runs unbroken behind and between them. */
 #story-scroll {
   position: absolute; top: 0; bottom: 0; left: 0;
   width: min(430px, 42vw); overflow-y: auto; pointer-events: auto;
-  background: linear-gradient(to right, rgba(12,12,9,.94) 70%, rgba(12,12,9,.78));
-  border-right: 1px solid var(--line);
   scroll-behavior: auto;
+  scrollbar-width: none;              /* the cards are the only furniture */
 }
+#story-scroll::-webkit-scrollbar { width: 0; height: 0; }
 #story-exit {
   position: absolute; top: 14px; right: 14px; z-index: 1600; pointer-events: auto;
+  color: #23261e;                      /* matches the cards, not the dark app chrome */
+  background: rgba(250, 249, 245, .76);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, .65);
+  box-shadow: 0 6px 18px rgba(28, 32, 24, .18);
 }
+/* The article is the scroll-pacing unit and stays invisible; .ch-inner is
+   the panel you actually see, centred in that span so it floats. */
 .chapter-card {
-  min-height: 86vh; padding: 28vh 26px 14vh; border-bottom: 1px solid #ffffff10;
-  opacity: .42; transition: opacity .35s ease;
+  min-height: 86vh; display: flex; align-items: center;
+  padding: 7vh 20px;
+  opacity: .45; transition: opacity .4s ease;
 }
 .chapter-card.live { opacity: 1; }
-.chapter-card h2 { margin: 0 0 4px; font-size: 22px; letter-spacing: .01em; }
+/* Light glass, not dark: the basemap is pale, so a dark panel over it reads
+   as a slab laid on top. Pale translucency lets the map tint the card and
+   the two stop looking like separate layers. The rest of the app stays dark,
+   but in story mode the chrome is hidden and only map and cards remain. */
+.ch-inner {
+  width: 100%; padding: 20px 22px; border-radius: 16px;
+  color: #23261e;
+  background: rgba(250, 249, 245, .76);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, .65);
+  box-shadow: 0 8px 22px rgba(28, 32, 24, .14);
+  transition: background-color .4s ease, box-shadow .4s ease;
+}
+/* Fading alone barely separates a pale card from a pale map, so the live
+   chapter also sits more solidly and lifts further off the surface. */
+.chapter-card.live .ch-inner {
+  background: rgba(250, 249, 245, .85);
+  box-shadow: 0 18px 44px rgba(28, 32, 24, .26);
+}
+.chapter-card h2 {
+  margin: 0 0 4px; font-size: 22px; letter-spacing: .01em; color: #14160f;
+}
 .chapter-card .ch-meta {
-  color: var(--muted); font-size: 12px; margin-bottom: 14px;
+  color: #666b5c; font-size: 12px; margin-bottom: 14px;
   font-variant-numeric: tabular-nums;
 }
-.chapter-card p { color: #ded7cd; line-height: 1.72; margin: 0 0 14px; white-space: pre-wrap; }
+.chapter-card p { color: #2f332a; line-height: 1.72; margin: 0 0 14px; white-space: pre-wrap; }
+.ch-inner > :last-child { margin-bottom: 0; }
 .chapter-card figure { margin: 0 0 14px; }
 .chapter-card img {
-  width: 100%; border-radius: 9px; display: block; background: var(--panel-2);
+  width: 100%; border-radius: 9px; display: block; background: #e6e4dc;
 }
-.chapter-card figcaption { color: var(--muted); font-size: 11px; margin-top: 5px; }
+.chapter-card figcaption { color: #666b5c; font-size: 11px; margin-top: 5px; }
 .chapter-card .broken-photo {
   display: flex; flex-direction: column; gap: 4px;
-  padding: 14px; border: 1px dashed var(--line); border-radius: 9px;
-  font-size: 11px; color: var(--muted);
+  padding: 14px; border: 1px dashed #c6c3b6; border-radius: 9px;
+  font-size: 11px; color: #666b5c;
 }
-.chapter-card .broken-photo b { color: var(--text); font-size: 12px; }
+.chapter-card .broken-photo b { color: #23261e; font-size: 12px; }
 .chapter-card .broken-photo span { word-break: break-all; }
-.story-end { padding: 26vh 26px 30vh; color: var(--muted); font-size: 13px; }
+.story-end { display: flex; justify-content: center; padding: 18vh 20px 24vh; }
+.story-end span {
+  padding: 9px 16px; border-radius: 999px; color: #666b5c; font-size: 12px;
+  background: rgba(250, 249, 245, .76);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, .65);
+}
 
 @media (max-width: 760px) {
+  /* The column is a band across the bottom, so a card crossing its top
+     edge gets sliced — often straight through a heading. Fade the top
+     instead of cutting it, so the band reads as depth rather than damage. */
   #story-scroll {
     width: 100%; top: auto; height: 62dvh; bottom: 0;
-    background: linear-gradient(to top, rgba(12,12,9,.96) 78%, rgba(12,12,9,.7));
-    border-right: 0; border-top: 1px solid var(--line);
+    mask-image: linear-gradient(to bottom, transparent 0, #000 9%, #000 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 9%, #000 100%);
   }
-  .chapter-card { min-height: 52dvh; padding: 16vh 18px 10vh; }
+  .chapter-card { min-height: 52dvh; padding: 3vh 14px 5vh; }
   .chapter-card h2 { font-size: 19px; }
+  .ch-inner { padding: 16px 17px; border-radius: 14px; }
 }
