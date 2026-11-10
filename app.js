@@ -1773,12 +1773,68 @@ function renderPhotoRows(photos) {
 
 function addPhotoRow(url, caption) {
   const li = document.createElement('li');
+  li.className = 'photo-row';
   li.innerHTML =
-    `<input class="p-url" type="url" placeholder="https://…/photo.jpg" value="${escapeHTML(url || '')}">` +
-    `<input class="p-cap" type="text" placeholder="caption" value="${escapeHTML(caption || '')}">` +
+    `<img class="p-thumb" alt="">` +
+    `<div class="p-fields">` +
+      `<input class="p-url" type="url" placeholder="https://…/photo.jpg" value="${escapeHTML(url || '')}">` +
+      `<input class="p-cap" type="text" placeholder="caption" value="${escapeHTML(caption || '')}">` +
+      `<span class="p-state"></span>` +
+    `</div>` +
     `<button class="del" title="Remove">✕</button>`;
   li.querySelector('.del').onclick = () => li.remove();
+
+  // Load the URL as soon as it is pasted and say what happened. A broken
+  // link is otherwise completely invisible: an <img> that fails to load
+  // collapses to nothing, so the row looks saved and the story looks empty.
+  const input = li.querySelector('.p-url');
+  const thumb = li.querySelector('.p-thumb');
+  const note  = li.querySelector('.p-state');
+  let timer = null;
+  const probe = () => probePhoto(input.value, thumb, note);
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(probe, 450);      // let a paste or typing settle first
+  });
+  input.addEventListener('change', probe);
+
   $('#ch-photos').appendChild(li);
+  if (url) probe();
+}
+
+const BLANK_PIXEL =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+/**
+ * Point a thumbnail at a URL and report the outcome next to it.
+ * Asking the browser to load it is the only reliable test: file extensions
+ * lie, plenty of hosts serve images from extensionless paths, and some
+ * refuse to serve them to another site at all.
+ */
+function probePhoto(raw, thumb, note) {
+  const u = String(raw || '').trim();
+  thumb.classList.remove('ok', 'bad');
+  note.classList.remove('bad');
+  thumb.removeAttribute('src');        // forces a fresh load for the same URL
+
+  if (!u) { note.textContent = ''; return; }
+
+  note.textContent = 'Loading…';
+  thumb.onload = () => {
+    thumb.classList.add('ok');
+    note.textContent = `${thumb.naturalWidth} × ${thumb.naturalHeight}`;
+  };
+  thumb.onerror = () => {
+    // Swap in a blank pixel rather than clearing src: an <img> left in its
+    // failed state paints the browser's broken-image glyph, which reads as
+    // a bug in the app instead of as a bad link.
+    thumb.onload = thumb.onerror = null;
+    thumb.src = BLANK_PIXEL;
+    thumb.classList.add('bad');
+    note.classList.add('bad');
+    note.textContent = 'Didn’t load — needs a direct link to the image file itself';
+  };
+  thumb.src = u;
 }
 
 function collectPhotoRows() {
@@ -1852,6 +1908,22 @@ function openStory() {
   }).join('') + `<div class="story-end">End of the journey — ${escapeHTML(state.name)}</div>`;
 
   story.cards = Array.from(wrap.querySelectorAll('.chapter-card'));
+
+  // A photo whose URL has stopped resolving would otherwise leave a silent
+  // gap in the story. Show what was meant to be there instead.
+  wrap.querySelectorAll('.chapter-card img').forEach(im => {
+    im.addEventListener('error', () => {
+      const fig = im.closest('figure');
+      if (!fig) return;
+      fig.classList.add('broken');
+      const box = document.createElement('div');
+      box.className = 'broken-photo';
+      box.innerHTML = `<b>Photo didn’t load</b>` +
+        `<span>${escapeHTML(im.getAttribute('src') || '')}</span>`;
+      im.replaceWith(box);
+    });
+  });
+
   story.active = -1;
 
   document.body.classList.add('story');
