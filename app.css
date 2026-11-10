@@ -363,7 +363,10 @@ body.has-scrubber .round-wide { bottom: 66px; }
 .list li .grip { color: var(--muted); cursor: grab; flex: 0 0 auto; }
 
 /* ── Video export ─────────────────────────────────── */
+/* An id beats [hidden] on specificity, so without the second rule this
+   row ignores its own hidden attribute and sits there empty. */
 #vid-progress { display: flex; align-items: center; gap: 10px; }
+#vid-progress[hidden] { display: none; }
 #vid-progress .bar {
   flex: 1 1 auto; height: 6px; border-radius: 3px;
   background: var(--panel-2); overflow: hidden;
