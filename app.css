@@ -376,6 +376,28 @@ body.has-scrubber .round-wide { bottom: 66px; }
 #video-modal .dates label { flex: 1 1 0; min-width: 0; }
 #vid-status { flex: 0 0 auto; font-size: 11px; color: var(--muted); }
 
+/* Camera preview: two stills, the frame it opens on and the one it ends on.
+   The point of these is that nobody should have to guess what a camera
+   setting will look like — the answer is rendered from the real export map. */
+.vid-preview {
+  display: flex; gap: 10px; justify-content: center;
+  margin: 10px 0 2px; min-height: 8px;
+}
+.vid-preview figure { margin: 0; text-align: center; }
+.vid-preview canvas {
+  display: block; max-height: 190px; width: auto;
+  border-radius: 7px; background: #1a1c18;
+  box-shadow: 0 1px 6px rgba(0,0,0,.35);
+}
+.vid-preview figcaption {
+  margin-top: 4px; font-size: 10px; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted);
+}
+.vid-preview.busy canvas { opacity: .55; transition: opacity .15s; }
+#vid-close-row.off { display: none; }
+#vid-close-val { float: right; color: var(--muted); font-size: 11px; }
+
+
 /* ── Story mode ──────────────────────────────────────────────────── */
 body.story #panel, body.story #topbar { display: none; }
 body.story main { height: 100dvh; }

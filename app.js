@@ -2551,7 +2551,138 @@ function drawDot(ctx, m, pos, w, h) {
   ctx.stroke();
 }
 
+// ── Video export: the camera ────────────────────────────────
+// The camera is described by what it *does*, not by a zoom number. Nobody
+// recording a journey thinks "zoom 11.5"; they think "start wide, then come
+// in close". So the dialog offers four moves and one closeness, and the two
+// stills under them show the frame this actually produces.
+
+const CAMERA_MOVES = {
+  in:     { label: 'Open wide, then close in on the rider', close: true  },
+  whole:  { label: 'Hold the whole route in frame',         close: false },
+  follow: { label: 'Stay close to the rider throughout',    close: true  },
+  out:    { label: 'Start close, pull back to the whole route', close: true },
+};
+
+// Closeness as ground covered by the frame's width, which is a thing you can
+// picture. The zoom number that produces it depends on the output size and
+// the latitude, so it is solved for per frame rather than stored.
+const CLOSENESS = [
+  { label: 'Street level', metres: 2000 },
+  { label: 'Town',         metres: 8000 },
+  { label: 'Area',         metres: 30000 },
+  { label: 'Region',       metres: 120000 },
+  { label: 'Country',      metres: 500000 },
+];
+
+function closenessLabel(i) {
+  const c = CLOSENESS[Math.max(0, Math.min(CLOSENESS.length - 1, i))];
+  const across = c.metres >= 1000 ? Math.round(c.metres / 1000) + ' km' : c.metres + ' m';
+  return `${c.label} · about ${across} across`;
+}
+
+/** Zoom at which this map's frame spans `metres` of ground.
+ *
+ *  Derived from the map rather than from a constant: metres-per-pixel is
+ *  proportional to 2^-zoom, so measuring the current span and taking the
+ *  log of the ratio gives the answer without depending on MapLibre's tile
+ *  size or zoom convention, and it stays right wherever the camera is.
+ *  Latitude matters, so call this with the centre already in place. */
+function zoomForWidth(m, metres, w, h) {
+  if (!(metres > 0)) return m.getZoom();
+  const a = m.unproject([0, h / 2]), b = m.unproject([w, h / 2]);
+  const cur = haversineKm([a.lat, a.lng], [b.lat, b.lng]) * 1000;
+  if (!(cur > 0)) return m.getZoom();
+  return m.getZoom() + Math.log2(cur / metres);
+}
+
+/** The points of the path between two fractions, ends included. */
+function pathSlice(t0, t1) {
+  const lo = t0 * anim.total, hi = t1 * anim.total, out = [];
+  const a = atFraction(t0), b = atFraction(t1);
+  if (a) out.push(a.pos);
+  for (let i = 0; i < anim.path.length; i++) {
+    if (anim.cum[i] > lo && anim.cum[i] < hi) out.push(anim.path[i]);
+  }
+  if (b) out.push(b.pos);
+  return out;
+}
+
+/** Slow in, slow out. A clip that snaps to speed at frame one looks broken. */
+function easeInOut(p) {
+  p = Math.min(1, Math.max(0, p));
+  return p < .5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+}
+
+/** Everything the camera needs that does not change frame to frame: where
+ *  the wide shot sits, and how close the close shot gets. */
+function cameraPlan(m, opts, w, h) {
+  const pts = pathSlice(opts.t0, opts.t1);
+  const b = boundsOf(pts);
+  let fit = null;
+  if (b) {
+    const cam = m.cameraForBounds(b, { padding: Math.round(Math.min(w, h) * 0.09) });
+    if (cam) fit = { center: [cam.center.lng, cam.center.lat], zoom: cam.zoom };
+  }
+  if (!fit) fit = { center: [6, 46], zoom: 4 };
+  const c = CLOSENESS[Math.max(0, Math.min(CLOSENESS.length - 1, opts.closeness))];
+  return { mode: opts.camera in CAMERA_MOVES ? opts.camera : 'in', fit, metres: c.metres };
+}
+
+/** Place the camera for one frame. `p` runs 0→1 across the whole clip. */
+function applyCamera(m, plan, at, p, w, h) {
+  const dot = [at.pos[1], at.pos[0]];
+
+  if (plan.mode === 'whole') {
+    m.jumpTo({ center: plan.fit.center, zoom: plan.fit.zoom });
+    return;
+  }
+  if (plan.mode === 'follow') {
+    m.jumpTo({ center: dot });
+    m.jumpTo({ center: dot, zoom: zoomForWidth(m, plan.metres, w, h) });
+    return;
+  }
+
+  // in / out: blend the wide shot into the close one. k is 0 at the wide end
+  // and 1 at the close end, so `out` is simply `in` run backwards.
+  const k = plan.mode === 'out' ? easeInOut(1 - p) : easeInOut(p);
+  m.jumpTo({ center: [
+    plan.fit.center[0] + (dot[0] - plan.fit.center[0]) * k,
+    plan.fit.center[1] + (dot[1] - plan.fit.center[1]) * k,
+  ] });
+  // Solved after the centre moves, so the latitude is the one being rendered.
+  const close = zoomForWidth(m, plan.metres, w, h);
+  m.jumpTo({ zoom: plan.fit.zoom + (close - plan.fit.zoom) * k });
+}
+
+/** One finished frame, composited. Returns the point it was drawn at. */
+async function renderVideoFrame(m, ctx, plan, segs, t, p, w, h, credit) {
+  const at = atFraction(t);
+  if (!at) return null;
+  applyCamera(m, plan, at, p, w, h);
+  paintTrail(m, segs, t * anim.total, true);
+  await mapIdle(m);
+  ctx.drawImage(m.getCanvas(), 0, 0, w, h);
+  drawDot(ctx, m, at.pos, w, h);
+  drawCredit(ctx, w, h, credit);
+  return at;
+}
+
 // ── Video export: the dialog ────────────────────────────────────────────────
+
+function videoOpts() {
+  const span = chapterSpan({ fromRideId: $('#vid-from').value, toRideId: $('#vid-to').value });
+  return {
+    preset: $('#vid-preset').value,
+    fps: +$('#vid-fps').value,
+    seconds: Math.max(2, Math.min(120, +$('#vid-secs').value || 15)),
+    camera: $('#vid-camera').value,
+    closeness: +$('#vid-close').value,
+    t0: span ? span.t0 : 0,
+    t1: span ? span.t1 : 1,
+    km: span ? span.km : 0,
+  };
+}
 
 function openVideoModal() {
   const sel = $('#vid-preset');
@@ -2559,7 +2690,19 @@ function openVideoModal() {
     sel.innerHTML = Object.entries(VIDEO_PRESETS)
       .map(([k, v]) => `<option value="${k}">${escapeHTML(v.label)}</option>`).join('');
   }
+  const cam = $('#vid-camera');
+  if (!cam.options.length) {
+    cam.innerHTML = Object.entries(CAMERA_MOVES)
+      .map(([k, v]) => `<option value="${k}">${escapeHTML(v.label)}</option>`).join('');
+  }
   prepareAnim();
+
+  if (state.rides.length) {
+    $('#vid-from').innerHTML = rideOptions(state.rides[0].id);
+    $('#vid-to').innerHTML = rideOptions(state.rides[state.rides.length - 1].id);
+  } else {
+    $('#vid-from').innerHTML = $('#vid-to').innerHTML = '';
+  }
 
   const note = $('#vid-note');
   const blocked = videoBlocker();
@@ -2578,7 +2721,22 @@ function openVideoModal() {
   $('#vid-status').textContent = '';
   $('#vid-cancel').textContent = 'Cancel';
   $('#video-modal').hidden = false;
+  syncCameraControls();
+}
+
+function closeVideoModal() {
+  $('#video-modal').hidden = true;
+  dropPreviewMap();
+}
+
+/** Keep the closeness row, its label, the estimate and the stills in step
+ *  with whatever was just changed. */
+function syncCameraControls() {
+  const move = CAMERA_MOVES[$('#vid-camera').value] || CAMERA_MOVES.in;
+  $('#vid-close-row').classList.toggle('off', !move.close);
+  $('#vid-close-val').textContent = closenessLabel(+$('#vid-close').value);
   estimateVideo();
+  queuePreview();
 }
 
 function fmtClock(secs) {
@@ -2592,23 +2750,78 @@ function fmtClock(secs) {
  *  by encoding — measured at 0.12 s a frame warm, 0.4 s cold. */
 function estimateVideo() {
   if ($('#vid-go').disabled) return;
-  const fps = +$('#vid-fps').value;
-  const secs = Math.max(2, Math.min(120, +$('#vid-secs').value || 15));
-  const frames = Math.round(secs * fps);
+  const o = videoOpts();
+  const frames = Math.round(o.seconds * o.fps);
+  const part = (o.t1 - o.t0) < .999
+    ? `${fmtKm(o.km)} km of the journey, ` : '';
   $('#vid-note').innerHTML =
-    `${frames.toLocaleString()} frames, so roughly ` +
+    `${part}${frames.toLocaleString()} frames, so roughly ` +
     `<b>${fmtClock(frames * 0.12)}–${fmtClock(frames * 0.4)}</b> to render. ` +
     `Leave this tab in front — browsers throttle background tabs and the ` +
     `render stalls.`;
 }
 
+// ── Video export: the two stills ────────────────────────────
+// A camera setting is only meaningful once you have seen what it frames, so
+// the dialog renders the first and last frame through the same code the
+// export uses. Small, and off the critical path: if it fails, the export is
+// still fine, so nothing here is allowed to throw outward.
+
+const preview = { map: null, host: null, key: '', seq: 0, timer: null };
+
+function dropPreviewMap() {
+  if (preview.map) { try { preview.map.remove(); } catch (e) {} }
+  if (preview.host) preview.host.remove();
+  preview.map = null; preview.host = null; preview.key = '';
+}
+
+function queuePreview() {
+  clearTimeout(preview.timer);
+  preview.timer = setTimeout(() => { renderPreview().catch(() => {}); }, 220);
+}
+
+async function renderPreview() {
+  if (video.running || $('#vid-go').disabled || $('#video-modal').hidden) return;
+  const seq = ++preview.seq;
+  const o = videoOpts();
+  const preset = VIDEO_PRESETS[o.preset] || VIDEO_PRESETS.reel;
+
+  // A still only has to show framing, so render at a fraction of the output
+  // and let the canvas scale: a full 1080×1920 map per keystroke is waste.
+  const scale = 190 / Math.max(preset.w, preset.h);
+  const w = Math.round(preset.w * scale), h = Math.round(preset.h * scale);
+
+  const box = $('#vid-preview');
+  box.classList.add('busy');
+  try {
+    const segs = trailSegments();
+    const key = `${w}x${h}:${state.settings.basemap}`;
+    if (preview.key !== key) {
+      dropPreviewMap();
+      const made = await makeExportMap(w, h, segs);
+      if (seq !== preview.seq) { made.map.remove(); made.host.remove(); return; }
+      preview.map = made.map; preview.host = made.host; preview.key = key;
+    }
+    const m = preview.map;
+    const plan = cameraPlan(m, o, w, h);
+    const credit = creditText();
+
+    for (const [id, t, p] of [['#vid-shot-a', o.t0, 0], ['#vid-shot-b', o.t1, 1]]) {
+      if (seq !== preview.seq) return;
+      const cv = $(id);
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d', { alpha: false });
+      await renderVideoFrame(m, ctx, plan, segs, t, p, w, h, credit);
+    }
+  } catch (e) {
+    dropPreviewMap();
+  } finally {
+    if (seq === preview.seq) box.classList.remove('busy');
+  }
+}
+
 async function runVideoExport() {
-  const opts = {
-    preset: $('#vid-preset').value,
-    fps: +$('#vid-fps').value,
-    seconds: Math.max(2, Math.min(120, +$('#vid-secs').value || 15)),
-    zoom: parseFloat($('#vid-zoom').value),
-  };
+  const opts = videoOpts();
 
   video.running = true;
   video.cancel = false;
@@ -2631,7 +2844,7 @@ async function runVideoExport() {
     if (!blob) { toast('Export stopped'); return; }
     const safe = state.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'journey';
     download(safe + '-animation.mp4', blob, 'video/mp4');
-    $('#video-modal').hidden = true;
+    closeVideoModal();
     toast(`Saved ${(blob.size / 1e6).toFixed(1)} MB of MP4`);
   } catch (e) {
     $('#vid-note').innerHTML = `<span class="warn">${escapeHTML(e.message || String(e))}</span>`;
@@ -2669,14 +2882,9 @@ async function exportVideo(opts, onProgress) {
   const ctx = cv.getContext('2d', { alpha: false });
   const credit = creditText();
 
-  // No zoom given means "show the whole thing": fit the route at the output's
-  // own aspect ratio, which is not the one on screen.
-  let zoom = opts.zoom;
-  if (!(zoom > 0)) {
-    const b = boundsOf(anim.path);
-    const cam = b && m.cameraForBounds(b, { padding: Math.round(Math.min(w, h) * 0.08) });
-    zoom = cam ? cam.zoom : 6;
-  }
+  // The wide shot is fitted to the stretch being exported at the output's own
+  // aspect ratio, which is not the one on screen.
+  const plan = cameraPlan(m, opts, w, h);
 
   const muxer = new Mp4Muxer.Muxer({
     target: new Mp4Muxer.ArrayBufferTarget(),
@@ -2690,23 +2898,17 @@ async function exportVideo(opts, onProgress) {
   });
   encoder.configure(cfg);
 
-  const t0 = 0, t1 = 1;
+  const t0 = Math.max(0, Math.min(1, opts.t0));
+  const t1 = Math.max(t0, Math.min(1, opts.t1));
   try {
     for (let f = 0; f < frames; f++) {
       if (video.cancel) break;
       if (encodeError) throw encodeError;
 
-      const t = t0 + (t1 - t0) * (f / (frames - 1));
-      const at = atFraction(t);
+      const p = f / (frames - 1);
+      const at = await renderVideoFrame(m, ctx, plan, segs, t0 + (t1 - t0) * p,
+                                        p, w, h, credit);
       if (!at) break;
-
-      m.jumpTo({ center: [at.pos[1], at.pos[0]], zoom });
-      paintTrail(m, segs, t * anim.total, true);
-      await mapIdle(m);
-
-      ctx.drawImage(m.getCanvas(), 0, 0, w, h);
-      drawDot(ctx, m, at.pos, w, h);
-      drawCredit(ctx, w, h, credit);
 
       const frame = new VideoFrame(cv, {
         timestamp: Math.round(f * 1e6 / fps),
@@ -3148,11 +3350,23 @@ function wire() {
   $('#vid-go').onclick = () => { if (!video.running) runVideoExport(); };
   $('#vid-cancel').onclick = () => {
     if (video.running) { video.cancel = true; $('#vid-status').textContent = 'stopping…'; }
-    else $('#video-modal').hidden = true;
+    else closeVideoModal();
   };
+  // Clicking the backdrop dismisses it, as it does on the other two sheets —
+  // but never mid-render, and always through the path that releases the
+  // preview's offscreen map.
+  $('#video-modal').addEventListener('click', e => {
+    if (e.target.id === 'video-modal' && !video.running) closeVideoModal();
+  });
+  // Length and frame rate change only the estimate; everything else changes
+  // what the camera frames, so it re-renders the two stills.
   ['#vid-secs', '#vid-fps'].forEach(sel => {
     $(sel).addEventListener('input', estimateVideo);
     $(sel).addEventListener('change', estimateVideo);
+  });
+  ['#vid-preset', '#vid-camera', '#vid-close', '#vid-from', '#vid-to'].forEach(sel => {
+    $(sel).addEventListener('input', syncCameraControls);
+    $(sel).addEventListener('change', syncCameraControls);
   });
 
   // Export menu

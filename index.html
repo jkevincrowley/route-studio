@@ -240,9 +240,20 @@
         </select>
       </label>
     </div>
-    <label>Zoom <input id="vid-zoom" type="number" min="1" max="18" step="0.5" placeholder="leave blank to fit the whole route">
-      <span class="hint">The camera holds this zoom and follows the dot.</span>
+    <div class="dates">
+      <label>From ride <select id="vid-from"></select></label>
+      <label>up to <select id="vid-to"></select></label>
+    </div>
+    <label>Camera
+      <select id="vid-camera"></select>
     </label>
+    <label id="vid-close-row">How close it gets <span id="vid-close-val" class="mono"></span>
+      <input id="vid-close" type="range" min="0" max="4" step="1" value="2">
+    </label>
+    <div id="vid-preview" class="vid-preview">
+      <figure><canvas id="vid-shot-a"></canvas><figcaption>Opens on</figcaption></figure>
+      <figure><canvas id="vid-shot-b"></canvas><figcaption>Ends on</figcaption></figure>
+    </div>
     <div id="vid-note" class="report"></div>
     <div id="vid-progress" class="report" hidden>
       <div class="bar"><i id="vid-bar"></i></div>
