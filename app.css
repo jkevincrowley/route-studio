@@ -394,9 +394,6 @@ body.has-scrubber .round-wide { bottom: 66px; }
   text-transform: uppercase; color: var(--muted);
 }
 .vid-preview.busy canvas { opacity: .55; transition: opacity .15s; }
-#vid-fig-m canvas { max-height: 260px; }
-#vid-play { margin-top: 2px; }
-#vid-play[disabled] { opacity: .6; }
 
 
 

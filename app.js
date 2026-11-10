@@ -2644,9 +2644,6 @@ function openVideoModal() {
   $('#vid-status').textContent = '';
   $('#vid-cancel').textContent = 'Cancel';
   $('#video-modal').hidden = false;
-  motion.frames = [];
-  stopMotion();
-  showMotion(false);
   syncVideoControls();
 }
 
@@ -2689,18 +2686,9 @@ function estimateVideo() {
 // export uses. Small, and off the critical path: if it fails, the export is
 // still fine, so nothing here is allowed to throw outward.
 
-const preview = { map: null, host: null, key: '', seq: 0, timer: null, chain: null };
-const motion = { frames: [], playing: false, timer: null, building: false, cancel: false };
-
-/** One offscreen map, one job at a time. */
-function previewWork(fn) {
-  preview.chain = (preview.chain || Promise.resolve()).then(fn).catch(() => {});
-  return preview.chain;
-}
+const preview = { map: null, host: null, key: '', seq: 0, timer: null };
 
 function dropPreviewMap() {
-  stopMotion();
-  motion.frames = [];
   if (preview.map) { try { preview.map.remove(); } catch (e) {} }
   if (preview.host) preview.host.remove();
   preview.map = null; preview.host = null; preview.key = '';
@@ -2708,15 +2696,11 @@ function dropPreviewMap() {
 
 function queuePreview() {
   clearTimeout(preview.timer);
-  // Any change invalidates a rendered move, so drop it and show the stills.
-  motion.frames = [];
-  stopMotion();
-  showMotion(false);
-  preview.timer = setTimeout(() => { previewWork(renderPreview); }, 220);
+  preview.timer = setTimeout(() => { renderPreview().catch(() => {}); }, 220);
 }
 
 async function renderPreview() {
-  if (motion.building || video.running || $('#vid-go').disabled || $('#video-modal').hidden) return;
+  if (video.running || $('#vid-go').disabled || $('#video-modal').hidden) return;
   const seq = ++preview.seq;
   const o = videoOpts();
   const preset = VIDEO_PRESETS[o.preset] || VIDEO_PRESETS.reel;
@@ -2756,107 +2740,6 @@ async function renderPreview() {
   }
 }
 
-// ── Video export: previewing the move ────────────────────────
-// Two stills say where the camera starts and stops; they cannot show how it
-// moves between them, which is the part worth checking. This renders the
-// whole move, sampled evenly and small, and loops it — seconds of waiting
-// instead of minutes, for the one question a still cannot answer.
-
-const MOTION_FRAMES = 30, MOTION_FPS = 12;
-
-function showMotion(on) {
-  $('#vid-fig-a').hidden = on;
-  $('#vid-fig-b').hidden = on;
-  $('#vid-fig-m').hidden = !on;
-}
-
-function refreshMotionButton(progress) {
-  const b = $('#vid-play');
-  if (!b) return;
-  b.disabled = !!$('#vid-go').disabled;
-  b.textContent = progress ? `Rendering… ${progress}  (tap to stop)`
-                : motion.playing ? '■ Stop'
-                : motion.frames.length ? '▶ Play it again'
-                : '▶ Preview the animation';
-}
-
-function stopMotion() {
-  motion.playing = false;
-  if (motion.timer) { clearInterval(motion.timer); motion.timer = null; }
-  refreshMotionButton();
-}
-
-function playMotion() {
-  if (!motion.frames.length) return;
-  showMotion(true);
-  const cv = $('#vid-motion'), first = motion.frames[0];
-  cv.width = first.width; cv.height = first.height;
-  const ctx = cv.getContext('2d', { alpha: false });
-  let i = 0;
-  if (motion.timer) clearInterval(motion.timer);
-  motion.playing = true;
-  motion.timer = setInterval(() => {
-    ctx.drawImage(motion.frames[i % motion.frames.length], 0, 0);
-    i++;
-  }, 1000 / MOTION_FPS);
-  refreshMotionButton();
-}
-
-function toggleMotion() {
-  if (motion.building) { motion.cancel = true; return; }
-  if (motion.playing) { stopMotion(); return; }
-  if (motion.frames.length) { playMotion(); return; }
-  previewWork(buildMotion);
-}
-
-async function buildMotion() {
-  if ($('#vid-go').disabled || $('#video-modal').hidden) return;
-  motion.building = true;
-  motion.cancel = false;
-  refreshMotionButton('0/' + MOTION_FRAMES);
-  const box = $('#vid-preview');
-  box.classList.add('busy');
-  try {
-    const o = videoOpts();
-    const preset = VIDEO_PRESETS[o.preset] || VIDEO_PRESETS.reel;
-    const scale = 200 / Math.max(preset.w, preset.h);
-    const w = Math.round(preset.w * scale), h = Math.round(preset.h * scale);
-    const segs = trailSegments();
-
-    const key = `${w}x${h}:${state.settings.basemap}`;
-    if (preview.key !== key) {
-      dropPreviewMap();
-      const made = await makeExportMap(w, h, segs);
-      preview.map = made.map; preview.host = made.host; preview.key = key;
-    }
-    const m = preview.map;
-    const cam = staticCamera(m, o, w, h);
-    const credit = creditText();
-
-    const built = [];
-    for (let f = 0; f < MOTION_FRAMES; f++) {
-      if (motion.cancel) return;
-      const p = f / (MOTION_FRAMES - 1);
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      const ctx = cv.getContext('2d', { alpha: false });
-      await renderVideoFrame(m, ctx, cam, segs,
-                             o.t0 + (o.t1 - o.t0) * p, w, h, credit);
-      built.push(cv);
-      refreshMotionButton(`${f + 1}/${MOTION_FRAMES}`);
-    }
-    motion.frames = built;
-  } catch (e) {
-    motion.frames = [];
-  } finally {
-    const stopped = motion.cancel;
-    motion.building = false;
-    motion.cancel = false;
-    box.classList.remove('busy');
-    if (motion.frames.length && !stopped) playMotion(); else stopMotion();
-  }
-}
-
 async function runVideoExport() {
   const opts = videoOpts();
 
@@ -2872,8 +2755,10 @@ async function runVideoExport() {
     $('#vid-bar').style.width = (done / total * 100).toFixed(1) + '%';
     const per = (Date.now() - started) / done;
     const left = Math.round((total - done) * per / 1000);
+    // fmtDuration speaks in hours and minutes, so a render of less than a
+    // minute read "0m left". Frames are the honest unit here anyway.
     $('#vid-status').textContent =
-      `${done}/${total}` + (done > 4 ? ` · ${fmtDuration(left)} left` : '');
+      `${done}/${total} frames` + (done > 3 ? ` · ${fmtClock(left)} left` : '');
   };
 
   try {
@@ -3390,7 +3275,6 @@ function wire() {
   // Clicking the backdrop dismisses it, as it does on the other two sheets —
   // but never mid-render, and always through the path that releases the
   // preview's offscreen map.
-  $('#vid-play').onclick = () => toggleMotion();
   $('#video-modal').addEventListener('click', e => {
     if (e.target.id === 'video-modal' && !video.running) closeVideoModal();
   });
