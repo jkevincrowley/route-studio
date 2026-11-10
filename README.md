@@ -112,8 +112,8 @@ centred.
 
 | Export | What you get |
 |---|---|
-| **Share the animated map** | A link to the journey animating on a map. Chapters are deliberately left out, so writing meant for one audience cannot ride along to another. |
-| **Share the story** | A link that opens straight into the chapters, scrolled through with the map drawing beneath. Closing the story leaves the same map behind. |
+| **Share Route Map** | A link to the journey animating on a map. Chapters are deliberately left out, so writing meant for one audience cannot ride along to another. |
+| **Share Story Map** | A link that opens straight into the chapters, scrolled through with the map drawing beneath. Closing the story leaves the same map behind. |
 | **Animated map (HTML)** | One self-contained file with the map, transfers and a working animation — the map only, no chapters. Upload it anywhere — GitHub Pages, Netlify, any web host. |
 | **Route line (GeoJSON)** | One `LineString` per continuous run, with distance and which transfers bridged it. |
 | **Route line (GPX)** | The joined route as a track, one segment per run. |
