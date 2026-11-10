@@ -37,6 +37,7 @@
       <button class="tab active" data-tab="rides" role="tab">Rides</button>
       <button class="tab" data-tab="transfers" role="tab">Transfers</button>
       <button class="tab" data-tab="animate" role="tab">Animate</button>
+      <button class="tab" data-tab="story" role="tab">Story</button>
       <button class="tab" data-tab="settings" role="tab">Settings</button>
     </nav>
 
@@ -130,6 +131,24 @@
       <div id="anim-readout" class="report"></div>
     </section>
 
+    <!-- Story -->
+    <section class="tab-body" data-body="story">
+      <p class="hint">
+        Chapters turn the journey into something you scroll through: as a
+        chapter comes into view the map draws that stretch of route beneath it.
+      </p>
+      <button id="btn-add-chapter" class="primary wide">Add a chapter</button>
+
+      <div class="list-head">
+        <span id="chapters-count">No chapters yet</span>
+        <button id="btn-clear-chapters" class="link">Remove all</button>
+      </div>
+      <ul id="chapter-list" class="list"></ul>
+
+      <button id="btn-tell-story" class="ghost wide">Read the story</button>
+      <p class="hint" id="story-hint"></p>
+    </section>
+
     <!-- Settings -->
     <section class="tab-body" data-body="settings">
       <label>Route colour <input id="brand" type="color" value="#FF6B35"></label>
@@ -199,6 +218,41 @@
       <button id="share-close" class="ghost">Done</button>
     </div>
   </div>
+</div>
+
+<div id="chapter-modal" hidden>
+  <div class="sheet wide-sheet">
+    <h2 id="chapter-modal-title">Chapter</h2>
+    <label>Title <input id="ch-title" type="text" placeholder="e.g. Along the Algarve"></label>
+    <div class="dates">
+      <label>From ride <select id="ch-from"></select></label>
+      <label>To ride <select id="ch-to"></select></label>
+    </div>
+    <div id="ch-span" class="report"></div>
+    <label>Your writing
+      <textarea id="ch-text" rows="7" placeholder="What happened on this stretch?"></textarea>
+    </label>
+    <div class="list-head">
+      <span>Photos</span>
+      <button id="ch-add-photo" class="link">Add a photo URL</button>
+    </div>
+    <ul id="ch-photos" class="list"></ul>
+    <p class="hint">
+      Paste a link to a photo you already host — Substack, Flickr, anywhere.
+      Nothing is uploaded, so published stories stay small.
+    </p>
+    <div class="row">
+      <button id="ch-save" class="primary">Save chapter</button>
+      <button id="ch-cancel" class="ghost">Cancel</button>
+      <span class="spacer"></span>
+      <button id="ch-delete" class="danger">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="story" hidden>
+  <button id="story-exit" class="ghost">✕ Close</button>
+  <div id="story-scroll"></div>
 </div>
 
 <div id="toast" hidden></div>

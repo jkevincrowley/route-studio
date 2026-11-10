@@ -42,6 +42,9 @@ const state = {
   transfers: [],    // {id, mode, label, points:[[lat,lon],…]}
   settings: { basemap: 'muted', brand: '#FF6B35', simplify: 10, tol: 25 },
   runs: [],
+  // Scrollytelling: chapters spanning a range of rides, each with its own
+  // text and photo URLs. Empty until you write one.
+  chapters: [],     // {id, title, text, fromRideId, toRideId, photos:[{url,caption}]}
 };
 
 let map, tileLayer;
@@ -819,6 +822,54 @@ function prepareAnim() {
   $('#scrubber').hidden = pts.length < 2;
 }
 
+// ── Chapters ────────────────────────────────────────────────────────────────
+
+/** Where along the animated path a coordinate sits, as a 0–1 fraction.
+ *
+ *  The path is the simplified, joined route, so a ride's own points are not in
+ *  it verbatim — the nearest path point is the honest answer, and at 6000
+ *  points a linear scan is well under a millisecond.
+ */
+function fractionOfPoint(pt) {
+  if (!anim.path || anim.path.length < 2 || !anim.total) return 0;
+  let best = 0, bestD = Infinity;
+  for (let i = 0; i < anim.path.length; i++) {
+    const p = anim.path[i];
+    const dLat = p[0] - pt[0], dLon = p[1] - pt[1];
+    const d = dLat * dLat + dLon * dLon;      // squared degrees is enough to rank
+    if (d < bestD) { bestD = d; best = i; }
+  }
+  return Math.min(1, Math.max(0, anim.cum[best] / anim.total));
+}
+
+/** Rides a chapter covers, in journey order. */
+function chapterRides(ch) {
+  const ids = state.rides.map(r => r.id);
+  let a = ids.indexOf(ch.fromRideId), b = ids.indexOf(ch.toRideId);
+  if (a === -1) a = 0;
+  if (b === -1) b = state.rides.length - 1;
+  if (a > b) { const t = a; a = b; b = t; }
+  return state.rides.slice(a, b + 1);
+}
+
+/** The stretch of route a chapter covers, as {t0, t1} fractions, plus its
+ *  own distance, climbing and dates. Recomputed whenever rides change. */
+function chapterSpan(ch) {
+  const rides = chapterRides(ch);
+  if (!rides.length) return null;
+  const first = rides[0], last = rides[rides.length - 1];
+  const t0 = fractionOfPoint(first.points[0]);
+  const t1 = fractionOfPoint(last.points[last.points.length - 1]);
+  const km = rides.reduce((s, r) => s + r.dist, 0);
+  const ascent = rides.reduce((s, r) => s + (r.ascent || 0), 0);
+  const secs = rides.reduce((s, r) => s + (r.duration || 0), 0);
+  return {
+    rides, km, ascent, secs,
+    t0: Math.min(t0, t1), t1: Math.max(t0, t1),
+    from: first.date.slice(0, 10), to: last.date.slice(0, 10),
+  };
+}
+
 /** Position at fraction f (0–1) along the path, interpolated between points. */
 function atFraction(f) {
   if (anim.path.length < 2) return null;
@@ -1039,6 +1090,7 @@ function escapeHTML(s) {
 function refreshAll() {
   drawRides();
   syncProfileButton();
+  renderChapters();
   drawTransfers();
   recomputeRuns();
   renderRides();
@@ -1102,6 +1154,7 @@ function serialise() {
   return {
     v: 1, name: state.name, rides: state.rides,
     transfers: state.transfers, settings: state.settings,
+    chapters: state.chapters,
   };
 }
 
@@ -1109,6 +1162,7 @@ function load(data) {
   state.name = data.name || 'My Journey';
   state.rides = data.rides || [];
   state.transfers = data.transfers || [];
+  state.chapters = data.chapters || [];
   Object.assign(state.settings, data.settings || {});
   $('#project-name').value = state.name;
   $('#brand').value = state.settings.brand;
@@ -1657,6 +1711,213 @@ function clearRideHighlight() {
   rideHighlight = null;
 }
 
+
+// ── Story: authoring ────────────────────────────────────────────────────────
+
+let editingChapter = null;      // the chapter being edited, or null for a new one
+
+function renderChapters() {
+  const ul = $('#chapter-list');
+  ul.innerHTML = '';
+  state.chapters.forEach((ch, i) => {
+    const span = chapterSpan(ch);
+    const li = document.createElement('li');
+    li.innerHTML =
+      `<span class="nm" title="${escapeHTML(ch.title || 'Untitled')}">` +
+      `${escapeHTML(ch.title || 'Untitled')}</span>` +
+      `<span class="meta">${span ? `${span.rides.length} rides` : '—'}</span>` +
+      `<button class="del" title="Edit">✎</button>`;
+    li.querySelector('.del').onclick = () => openChapterEditor(ch);
+    li.onmouseenter = () => { if (span) highlight(span.rides.flatMap(r => r.points)); };
+    li.onmouseleave = clearHighlight;
+    ul.appendChild(li);
+  });
+
+  const n = state.chapters.length;
+  $('#chapters-count').textContent = n ? `${n} chapter${n === 1 ? '' : 's'}` : 'No chapters yet';
+  $('#btn-tell-story').disabled = n === 0;
+  $('#story-hint').textContent = n
+    ? 'Scroll through it, or publish and the link opens straight into the story.'
+    : 'Add a chapter to turn the journey into a scrolling story.';
+}
+
+function rideOptions(selected) {
+  return state.rides.map(r =>
+    `<option value="${escapeHTML(r.id)}"${r.id === selected ? ' selected' : ''}>` +
+    `${escapeHTML(fmtShortDate(r.date))} — ${escapeHTML(r.name)}</option>`).join('');
+}
+
+function openChapterEditor(ch) {
+  if (!state.rides.length) { toast('Add some rides first', true); return; }
+  editingChapter = ch || null;
+
+  const first = state.rides[0], last = state.rides[state.rides.length - 1];
+  $('#chapter-modal-title').textContent = ch ? 'Edit chapter' : 'New chapter';
+  $('#ch-title').value = ch ? (ch.title || '') : '';
+  $('#ch-text').value = ch ? (ch.text || '') : '';
+  $('#ch-from').innerHTML = rideOptions(ch ? ch.fromRideId : first.id);
+  $('#ch-to').innerHTML = rideOptions(ch ? ch.toRideId : last.id);
+  $('#ch-delete').hidden = !ch;
+
+  renderPhotoRows(ch ? (ch.photos || []) : []);
+  updateChapterSpanNote();
+  $('#chapter-modal').hidden = false;
+  $('#ch-title').focus();
+}
+
+function renderPhotoRows(photos) {
+  const ul = $('#ch-photos');
+  ul.innerHTML = '';
+  photos.forEach(p => addPhotoRow(p.url, p.caption));
+}
+
+function addPhotoRow(url, caption) {
+  const li = document.createElement('li');
+  li.innerHTML =
+    `<input class="p-url" type="url" placeholder="https://…/photo.jpg" value="${escapeHTML(url || '')}">` +
+    `<input class="p-cap" type="text" placeholder="caption" value="${escapeHTML(caption || '')}">` +
+    `<button class="del" title="Remove">✕</button>`;
+  li.querySelector('.del').onclick = () => li.remove();
+  $('#ch-photos').appendChild(li);
+}
+
+function collectPhotoRows() {
+  return Array.from($('#ch-photos').querySelectorAll('li')).map(li => ({
+    url: li.querySelector('.p-url').value.trim(),
+    caption: li.querySelector('.p-cap').value.trim(),
+  })).filter(p => p.url);
+}
+
+/** Live summary of what the chosen ride range covers. */
+function updateChapterSpanNote() {
+  const probe = { fromRideId: $('#ch-from').value, toRideId: $('#ch-to').value };
+  const span = chapterSpan(probe);
+  const el = $('#ch-span');
+  if (!span) { el.textContent = ''; return; }
+  const bits = [`${span.rides.length} ride${span.rides.length === 1 ? '' : 's'}`,
+                `${fmtKm(span.km)} km`];
+  if (span.ascent > 0) bits.push(`${Math.round(span.ascent).toLocaleString()} m climbed`);
+  el.innerHTML = `<b>${span.from}</b> to <b>${span.to}</b> &middot; ${bits.join(' · ')}`;
+}
+
+function saveChapter() {
+  const data = {
+    id: editingChapter ? editingChapter.id : uid(),
+    title: $('#ch-title').value.trim() || 'Untitled',
+    text: $('#ch-text').value,
+    fromRideId: $('#ch-from').value,
+    toRideId: $('#ch-to').value,
+    photos: collectPhotoRows(),
+  };
+  if (editingChapter) {
+    Object.assign(editingChapter, data);
+  } else {
+    state.chapters.push(data);
+  }
+  // Keep chapters in journey order so the story reads forwards.
+  const order = state.rides.map(r => r.id);
+  state.chapters.sort((a, b) => order.indexOf(a.fromRideId) - order.indexOf(b.fromRideId));
+
+  $('#chapter-modal').hidden = true;
+  editingChapter = null;
+  renderChapters();
+  persist();
+}
+
+// ── Story: reading ──────────────────────────────────────────────────────────
+
+const story = { spans: [], cards: [], active: -1, raf: null };
+
+function openStory() {
+  if (!state.chapters.length) { toast('Add a chapter first', true); return; }
+  prepareAnim();
+  story.spans = state.chapters.map(chapterSpan);
+
+  const wrap = $('#story-scroll');
+  wrap.innerHTML = state.chapters.map((ch, i) => {
+    const sp = story.spans[i];
+    const meta = sp
+      ? [`${sp.from} – ${sp.to}`, `${fmtKm(sp.km)} km`]
+          .concat(sp.ascent > 0 ? [`${Math.round(sp.ascent).toLocaleString()} m`] : [])
+          .join('  ·  ')
+      : '';
+    const photos = (ch.photos || []).map(p =>
+      `<figure><img src="${escapeHTML(p.url)}" alt="${escapeHTML(p.caption || '')}" loading="lazy">` +
+      (p.caption ? `<figcaption>${escapeHTML(p.caption)}</figcaption>` : '') + `</figure>`).join('');
+    return `<article class="chapter-card" data-i="${i}">` +
+           `<h2>${escapeHTML(ch.title)}</h2>` +
+           `<div class="ch-meta">${escapeHTML(meta)}</div>` +
+           (ch.text ? `<p>${escapeHTML(ch.text)}</p>` : '') +
+           photos + `</article>`;
+  }).join('') + `<div class="story-end">End of the journey — ${escapeHTML(state.name)}</div>`;
+
+  story.cards = Array.from(wrap.querySelectorAll('.chapter-card'));
+  story.active = -1;
+
+  document.body.classList.add('story');
+  $('#story').hidden = false;
+  resizeMap();
+  wrap.scrollTop = 0;
+  wrap.addEventListener('scroll', onStoryScroll, { passive: true });
+  onStoryScroll();
+}
+
+function closeStory() {
+  const wrap = $('#story-scroll');
+  wrap.removeEventListener('scroll', onStoryScroll);
+  document.body.classList.remove('story');
+  $('#story').hidden = true;
+  story.cards = [];
+  resizeMap();
+  if (state.rides.length) fitAll();
+}
+
+/** Scroll position drives the animation.
+ *
+ *  The card crossing a line a third of the way down the column is the one
+ *  being read; how far it has crossed is how far through its stretch of route
+ *  we are. That maps straight onto the existing animation fraction, so the
+ *  dot and the drawn trail are the same code the play button uses.
+ */
+function onStoryScroll() {
+  if (story.raf) return;                 // coalesce to one update per frame
+  story.raf = requestAnimationFrame(() => {
+    story.raf = null;
+    const wrap = $('#story-scroll');
+    if (!story.cards.length) return;
+
+    const line = wrap.scrollTop + wrap.clientHeight * 0.34;
+    let idx = 0;
+    for (let i = 0; i < story.cards.length; i++) {
+      if (story.cards[i].offsetTop <= line) idx = i;
+    }
+    const card = story.cards[idx];
+    const span = story.spans[idx];
+    const progress = Math.min(1, Math.max(0,
+      (line - card.offsetTop) / Math.max(1, card.offsetHeight)));
+
+    if (idx !== story.active) {
+      story.cards.forEach((c, i) => c.classList.toggle('live', i === idx));
+      story.active = idx;
+    }
+    if (!span) return;
+
+    anim.t = span.t0 + (span.t1 - span.t0) * progress;
+    renderAnim();
+
+    const at = atFraction(anim.t);
+    if (at) {
+      // Keep the moving dot clear of the narrative column.
+      const narrow = window.innerWidth <= 760;
+      const offset = narrow ? [0, -wrap.clientHeight / 3]
+                            : [wrap.clientWidth / 2, 0];
+      const target = map.project(L.latLng(at.pos[0], at.pos[1]))
+                        .subtract(L.point(offset[0], offset[1]));
+      map.panTo(map.unproject(target), { animate: true, duration: 0.5, noMoveStart: true });
+    }
+  });
+}
+
 // ── Publishing ──────────────────────────────────────────────────────────────
 // A published map is one Firestore document: the project, gzipped and
 // base64'd, under the 1 MiB document ceiling. No SDK — the REST API is two
@@ -1738,6 +1999,7 @@ function publishPayload(simplifyM) {
       id: t.id, mode: t.mode, label: t.label,
       points: t.points.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]),
     })),
+    chapters: state.chapters,
   };
 }
 
@@ -1834,6 +2096,7 @@ async function openPublished(id) {
     state.name = data.name || 'Shared journey';
     state.rides = (data.rides || []).map(r => ({ ...r, points: r.points }));
     state.transfers = data.transfers || [];
+    state.chapters = data.chapters || [];
     Object.assign(state.settings, data.settings || {});
 
     refreshAll();
@@ -1851,6 +2114,10 @@ async function openPublished(id) {
     $('#viewer-card').hidden = false;
     $('#scrubber').hidden = anim.path.length < 2;
     status('');
+
+    // A journey with chapters was written to be read, so open into the story
+    // rather than a bare map. Closing it leaves the normal viewer behind.
+    if (state.chapters.length) openStory();
   } catch (e) {
     status('');
     document.body.classList.remove('viewing');
@@ -1973,6 +2240,35 @@ function wire() {
   $('#share-close').onclick = () => { $('#share-modal').hidden = true; };
   $('#share-modal').addEventListener('click', e => {
     if (e.target.id === 'share-modal') $('#share-modal').hidden = true;
+  });
+
+  // Story
+  $('#btn-add-chapter').onclick = () => openChapterEditor(null);
+  $('#ch-save').onclick = saveChapter;
+  $('#ch-cancel').onclick = () => { $('#chapter-modal').hidden = true; editingChapter = null; };
+  $('#ch-delete').onclick = () => {
+    if (!editingChapter) return;
+    if (!confirm(`Delete "${editingChapter.title || 'Untitled'}"?`)) return;
+    state.chapters = state.chapters.filter(c => c !== editingChapter);
+    $('#chapter-modal').hidden = true;
+    editingChapter = null;
+    renderChapters(); persist();
+  };
+  $('#ch-add-photo').onclick = () => addPhotoRow('', '');
+  $('#ch-from').onchange = updateChapterSpanNote;
+  $('#ch-to').onchange = updateChapterSpanNote;
+  $('#chapter-modal').addEventListener('click', e => {
+    if (e.target.id === 'chapter-modal') { $('#chapter-modal').hidden = true; editingChapter = null; }
+  });
+  $('#btn-clear-chapters').onclick = () => {
+    if (!state.chapters.length) return;
+    if (!confirm(`Remove all ${state.chapters.length} chapters? Rides are kept.`)) return;
+    state.chapters = []; renderChapters(); persist();
+  };
+  $('#btn-tell-story').onclick = openStory;
+  $('#story-exit').onclick = closeStory;
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !$('#story').hidden) closeStory();
   });
 
   // Clicking bare map drops the selection. On touch a near-miss is common, so

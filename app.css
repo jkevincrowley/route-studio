@@ -287,3 +287,73 @@ body.has-scrubber .round-wide { bottom: 66px; }
   .p-head { flex-wrap: wrap; gap: 4px; }
   #p-stats { margin-left: 0; }
 }
+
+/* ── Chapter editor ──────────────────────────────────────────────── */
+#chapter-modal {
+  position: fixed; inset: 0; z-index: 4000; display: grid; place-items: center;
+  background: rgba(0,0,0,.6); padding: 16px; overflow-y: auto;
+}
+.wide-sheet { width: min(560px, 100%); max-height: 88vh; overflow-y: auto; }
+.wide-sheet textarea {
+  display: block; width: 100%; margin-top: 4px; padding: 8px 10px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius); color: var(--text); font: inherit; resize: vertical;
+}
+.wide-sheet select {
+  display: block; width: 100%; margin-top: 4px; padding: 7px 9px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--radius); color: var(--text); font: inherit;
+}
+#ch-photos li { gap: 6px; }
+#ch-photos input {
+  flex: 1 1 auto; min-width: 0; padding: 5px 7px; font-size: 11px;
+  background: var(--bg); border: 1px solid var(--line);
+  border-radius: 5px; color: var(--text);
+}
+.list li .grip { color: var(--muted); cursor: grab; flex: 0 0 auto; }
+
+/* ── Story mode ──────────────────────────────────────────────────── */
+body.story #panel, body.story #topbar { display: none; }
+body.story main { height: 100dvh; }
+body.story #profile, body.story #p-show, body.story #scrubber { display: none !important; }
+
+#story {
+  position: absolute; inset: 0; z-index: 1500; pointer-events: none;
+}
+#story-scroll {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  width: min(430px, 42vw); overflow-y: auto; pointer-events: auto;
+  background: linear-gradient(to right, rgba(12,12,9,.94) 70%, rgba(12,12,9,.78));
+  border-right: 1px solid var(--line);
+  scroll-behavior: auto;
+}
+#story-exit {
+  position: absolute; top: 14px; right: 14px; z-index: 1600; pointer-events: auto;
+}
+.chapter-card {
+  min-height: 86vh; padding: 28vh 26px 14vh; border-bottom: 1px solid #ffffff10;
+  opacity: .42; transition: opacity .35s ease;
+}
+.chapter-card.live { opacity: 1; }
+.chapter-card h2 { margin: 0 0 4px; font-size: 22px; letter-spacing: .01em; }
+.chapter-card .ch-meta {
+  color: var(--muted); font-size: 12px; margin-bottom: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.chapter-card p { color: #ded7cd; line-height: 1.72; margin: 0 0 14px; white-space: pre-wrap; }
+.chapter-card figure { margin: 0 0 14px; }
+.chapter-card img {
+  width: 100%; border-radius: 9px; display: block; background: var(--panel-2);
+}
+.chapter-card figcaption { color: var(--muted); font-size: 11px; margin-top: 5px; }
+.story-end { padding: 26vh 26px 30vh; color: var(--muted); font-size: 13px; }
+
+@media (max-width: 760px) {
+  #story-scroll {
+    width: 100%; top: auto; height: 62dvh; bottom: 0;
+    background: linear-gradient(to top, rgba(12,12,9,.96) 78%, rgba(12,12,9,.7));
+    border-right: 0; border-top: 1px solid var(--line);
+  }
+  .chapter-card { min-height: 52dvh; padding: 16vh 18px 10vh; }
+  .chapter-card h2 { font-size: 19px; }
+}
