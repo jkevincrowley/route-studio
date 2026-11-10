@@ -22,6 +22,47 @@ export, or publish.
 
 ---
 
+## Make it your own
+
+Route Studio is eight static files with no server behind it, so a copy is
+genuinely yours — your rides never leave your machine, and nothing runs on
+anyone else's account.
+
+**No terminal, no coding. Four steps:**
+
+1. On this page, click the green **Use this template → Create a new repository**.
+   Give it a name and click **Create repository**.
+2. In your new repo: **Settings → Pages**, and under **Source** choose
+   **GitHub Actions**.
+3. Open the **Actions** tab. If it offers, click **I understand my workflows,
+   go ahead and enable them**, then let the first build finish.
+4. Your copy is live at `https://<your-username>.github.io/<your-repo>/`
+
+That's the whole thing. Drop GPX files in and everything works — the map, the
+transfer drawing, the elevation profile, the animation, and all the file
+exports. Your rides live in your own browser and are never uploaded.
+
+### Sharing (optional)
+
+Only **share links** need anything more, because a link has to be hosted
+somewhere. Your copy ships with that switched off; Publish will simply say
+sharing isn't configured.
+
+To turn it on, follow [Setting it up](#setting-it-up) below — a free Firebase
+project, no card — then add two repository variables under **Settings → Secrets
+and variables → Actions → Variables**:
+
+| Variable | Where it comes from |
+|---|---|
+| `FIREBASE_PROJECT_ID` | Firebase → Project settings → General |
+| `FIREBASE_API_KEY` | the same page, under Your apps → Web |
+
+Re-run the workflow from the **Actions** tab and Publish starts working. The
+deploy writes those into the site for you; nobody's keys are ever committed, so
+a copy of this repo can never write to somebody else's database.
+
+---
+
 ## Use it
 
 Open **[the app](https://jkevincrowley.github.io/route-studio/)** — or clone the

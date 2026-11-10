@@ -1,14 +1,17 @@
 /* Firebase project used for publishing shared maps.
  *
- * These two values are NOT secrets. A Firebase web apiKey identifies the
- * project to Google's APIs; it grants nothing on its own. What can actually
- * be read or written is decided entirely by the security rules in
- * firestore.rules. Committing this file is normal and expected.
+ * Left blank on purpose. On GitHub Pages this file is rewritten at deploy time
+ * from the repository variables FIREBASE_PROJECT_ID and FIREBASE_API_KEY, so a
+ * copy of this repo never carries anyone else's project. See README,
+ * "Sharing (optional)".
  *
- * Leave them blank and the app still works — Publish just reports that
- * sharing is not configured. See README "Publishing".
+ * Blank is fine: everything except share links works without it.
+ *
+ * Neither value is a secret. A Firebase web apiKey identifies a project to
+ * Google and grants nothing by itself; what can be read or written is decided
+ * entirely by firestore.rules.
  */
 window.ROUTE_STUDIO_FIREBASE = {
-  projectId: 'route-studio-1a777',
-  apiKey: 'AIzaSyBndPlyqlc8jTwrdA_l2hvacgoMW8-lvQs',
+  projectId: '',
+  apiKey: '',
 };

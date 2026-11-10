@@ -1,0 +1,69 @@
+# Publish Route Studio to GitHub Pages.
+#
+# The Firebase config is written here at deploy time from repository variables
+# rather than being committed, so a copy of this repo never carries anyone
+# else's project. Leave the variables unset and the site still works — it just
+# reports that sharing is not configured.
+#
+# Settings > Secrets and variables > Actions > Variables:
+#   FIREBASE_PROJECT_ID
+#   FIREBASE_API_KEY
+# Neither is a secret: a Firebase web key identifies a project and grants
+# nothing on its own. What can be read or written is decided by firestore.rules.
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write Firebase config
+        env:
+          PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          API_KEY: ${{ vars.FIREBASE_API_KEY }}
+        run: |
+          # JSON.stringify rather than shell interpolation: a value containing
+          # a quote would otherwise produce a broken or injectable file.
+          node -e '
+            const fs = require("fs");
+            const line = (k, v) => "  " + k + ": " + JSON.stringify(v || "") + ",";
+            fs.writeFileSync("firebase-config.js",
+              "/* Written at deploy time from repository variables. */\n" +
+              "window.ROUTE_STUDIO_FIREBASE = {\n" +
+              line("projectId", process.env.PROJECT_ID) + "\n" +
+              line("apiKey", process.env.API_KEY) + "\n" +
+              "};\n");
+          '
+          if [ -z "${PROJECT_ID}" ] || [ -z "${API_KEY}" ]; then
+            echo "::notice::Firebase variables not set — publishing share links will be disabled."
+          fi
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
