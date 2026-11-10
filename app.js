@@ -1081,7 +1081,7 @@ function trailGradient(f, color) {
  *  it verbatim — the nearest path point is the honest answer, and at 6000
  *  points a linear scan is well under a millisecond.
  */
-function fractionOfPoint(pt) {
+function fractionOfPoint(pt, bias) {
   if (!anim.path || anim.path.length < 2 || !anim.total) return 0;
   let best = 0, bestD = Infinity;
   for (let i = 0; i < anim.path.length; i++) {
@@ -1090,7 +1090,18 @@ function fractionOfPoint(pt) {
     const d = dLat * dLat + dLon * dLon;      // squared degrees is enough to rank
     if (d < bestD) { bestD = d; best = i; }
   }
-  return Math.min(1, Math.max(0, anim.cum[best] / anim.total));
+  let d = anim.cum[best];
+
+  // Run boundaries are deliberately zero-length, so the last point of one
+  // ride and the first point of the next sit at the same distance along the
+  // path. A plain fraction is therefore ambiguous there, and resolves to the
+  // earlier of the two — which would open a chapter on the tail of the ride
+  // before it. `bias` of +1 steps a hair into the new run to disambiguate;
+  // chapter ends need no bias, since the earlier point is the right one.
+  if (bias > 0 && best + 1 < anim.cum.length && anim.cum[best + 1] > d) {
+    d += (anim.cum[best + 1] - d) * 1e-3;
+  }
+  return Math.min(1, Math.max(0, d / anim.total));
 }
 
 /** Rides a chapter covers, in journey order. */
@@ -1109,7 +1120,7 @@ function chapterSpan(ch) {
   const rides = chapterRides(ch);
   if (!rides.length) return null;
   const first = rides[0], last = rides[rides.length - 1];
-  const t0 = fractionOfPoint(first.points[0]);
+  const t0 = fractionOfPoint(first.points[0], +1);
   const t1 = fractionOfPoint(last.points[last.points.length - 1]);
   const km = rides.reduce((s, r) => s + r.dist, 0);
   const ascent = rides.reduce((s, r) => s + (r.ascent || 0), 0);
@@ -2237,15 +2248,13 @@ function onStoryScroll() {
     const wrap = $('#story-scroll');
     if (!story.cards.length) return;
 
-    const line = wrap.scrollTop + wrap.clientHeight * storyLine();
+    const stop = storyStops(wrap);
+    const y = wrap.scrollTop;
     let idx = 0;
-    for (let i = 0; i < story.cards.length; i++) {
-      if (story.cards[i].offsetTop <= line) idx = i;
-    }
-    const card = story.cards[idx];
+    for (let i = 0; i < stop.starts.length; i++) if (y >= stop.starts[i]) idx = i;
     const span = story.spans[idx];
-    const progress = Math.min(1, Math.max(0,
-      (line - card.offsetTop) / Math.max(1, card.offsetHeight)));
+    const a = stop.starts[idx], b = stop.ends[idx];
+    const progress = b > a ? Math.min(1, Math.max(0, (y - a) / (b - a))) : 1;
 
     if (idx !== story.active) {
       story.cards.forEach((c, i) => c.classList.toggle('live', i === idx));
@@ -2264,6 +2273,29 @@ function onStoryScroll() {
   });
 }
 
+/** The scroll range each chapter owns.
+ *
+ *  A chapter has to begin with the dot at the first point of its "from" ride
+ *  and end with it at the last point of its "to" ride, so its range runs from
+ *  the scroll position where it takes over to the one where the next chapter
+ *  does — the last running to the bottom of the scroll.
+ *
+ *  Deriving progress from the trigger line instead got both ends wrong. The
+ *  line sits part-way down the viewport, so at the very top of the scroll it
+ *  was already past the first card's start and chapter one opened a third of
+ *  the way through; and the scroll ran out before the line could reach the
+ *  end of the last card, so the final chapter never finished. The lead-in and
+ *  tail spacers below exist to make every chapter's range the same length.
+ */
+function storyStops(wrap) {
+  const lead = wrap.clientHeight * storyLine();
+  const max = Math.max(1, wrap.scrollHeight - wrap.clientHeight);
+  const starts = story.cards.map(c =>
+    Math.min(max, Math.max(0, c.offsetTop - lead)));
+  const ends = starts.map((v, i) => i + 1 < starts.length ? starts[i + 1] : max);
+  return { starts, ends };
+}
+
 /** Where down the screen a chapter becomes the live one.
  *
  *  The card is pinned at exactly this height (CSS reads it back as
@@ -2280,8 +2312,13 @@ function storyLine() { return window.innerWidth <= 760 ? .58 : .30; }
 function syncStoryLine() {
   const wrap = $('#story-scroll');
   if (!wrap) return;
-  wrap.style.setProperty('--story-line',
-    Math.round(wrap.clientHeight * storyLine()) + 'px');
+  const h = wrap.clientHeight;
+  // Lead-in: without it the first card starts above the line it pins at, so
+  // it is neither pinned nor at the beginning of its own range.
+  wrap.style.setProperty('--story-line', Math.round(h * storyLine()) + 'px');
+  // Tail: enough scroll left under the last card for its range to match the
+  // others', rather than the dot racing through the final chapter.
+  wrap.style.setProperty('--story-tail', Math.round(h * (1 - storyLine())) + 'px');
 }
 
 /** How much of the map the narrative card is sitting on top of.

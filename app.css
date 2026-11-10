@@ -376,6 +376,7 @@ body.story .maplibregl-ctrl-top-left { display: none; }
   scroll-behavior: auto;
   overscroll-behavior: contain;       /* don't hand the scroll to the page */
   scrollbar-width: none;              /* the cards are the only furniture */
+  padding-top: var(--story-line, 30vh);
 }
 #story-scroll::-webkit-scrollbar { width: 0; height: 0; }
 #story-exit {
@@ -448,7 +449,10 @@ body.story .maplibregl-ctrl-top-left { display: none; }
 }
 .chapter-card .broken-photo b { color: #23261e; font-size: 12px; }
 .chapter-card .broken-photo span { word-break: break-all; }
-.story-end { display: flex; padding: 18vh 20px 24vh; }
+.story-end {
+  display: flex;
+  padding: 16vh 20px calc(var(--story-tail, 70vh) + 8vh);
+}
 .story-end span {
   padding: 9px 16px; border-radius: 999px; color: #666b5c; font-size: 12px;
   background: rgba(250, 249, 245, .76);
