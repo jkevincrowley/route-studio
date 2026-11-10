@@ -153,14 +153,20 @@ to 1.2 MB with no visible change. Set `0` to keep every point.
 **Map style** — dark, light or terrain, switched live.
 
 The basemap is [VersaTiles](https://versatiles.org) *Muted* — OpenStreetMap
-vector tiles, open source, **no API key and no quota**. Rendered by MapLibre GL
-inside Leaflet, so overlays, drawing and the animation are unaffected.
+vector tiles, open source, **no API key and no quota**.
 
-The style ships `projection: {type: "globe"}`, which does not work here:
-Leaflet draws its overlays in Web Mercator, so a globe basemap slides out from
-under the route lines. The style is fetched and its projection rewritten to
-`mercator` before MapLibre sees it. Anything added later from a vector style
-needs the same treatment — `forceMercator()` in `app.js`.
+**MapLibre GL is the map**, not just the basemap: it owns the camera and draws
+the route, the transfers and the animation as GL layers. It previously rendered
+only the tiles, inside Leaflet, which left Leaflet driving the camera — zoom
+moved in whole steps and every pan re-projected and repainted the whole track
+on a 2D canvas. Handing both jobs to the GPU is what makes panning and zooming
+continuous on a journey of any length.
+
+The style ships `projection: {type: "globe"}`, which `loadStyle()` in `app.js`
+rewrites to `mercator`. That used to be mandatory, because Leaflet's overlays
+were Web Mercator and a globe basemap slid out from under them. Every overlay
+is a GL layer now, so a globe would line up — Mercator is kept only because it
+is how the map has always looked, and dropping that one line tries the globe.
 
 Attribution is a licence condition, and appears in the map's own corner
 credit. Keep it if you publish.
@@ -195,8 +201,8 @@ cd route-studio
 open index.html          # or just double-click it
 ```
 
-Leaflet, Leaflet.draw and MapLibre GL load from unpkg, so the first load needs
-a connection. Everything else is local.
+MapLibre GL loads from unpkg, so the first load needs a connection. Everything
+else is local.
 
 To host your own copy, push to GitHub and turn on **Settings → Pages → Deploy
 from a branch → main**.

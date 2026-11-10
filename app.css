@@ -197,9 +197,39 @@ button.round {
 #toast.bad { border-left-color: var(--danger); }
 
 /* Leaflet dark tweaks */
-.leaflet-container { background: #0d0d0a; }
-.leaflet-bar a, .leaflet-draw-toolbar a { background-color: #26261f; color: #f0ebe3; }
-.leaflet-bar a:hover { background-color: #34342c; }
+/* ── MapLibre chrome ─────────────────────────────────────────────── */
+.maplibregl-map { font: inherit; background: #0d0d0a; }
+.maplibregl-ctrl-group {
+  background: #26261f; border: 1px solid var(--line);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .4);
+}
+.maplibregl-ctrl-group button + button { border-top: 1px solid var(--line); }
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon { filter: invert(1) brightness(.92); }
+.maplibregl-ctrl-group button:hover { background: #34342c; }
+.maplibregl-ctrl-attrib, .maplibregl-ctrl-scale {
+  background: rgba(12, 12, 9, .78); color: var(--muted);
+}
+.maplibregl-ctrl-attrib a { color: var(--muted); }
+.maplibregl-ctrl-scale { border-color: var(--muted); }
+
+/* Tooltips, which used to be Leaflet's. */
+.map-pop .maplibregl-popup-content {
+  background: #17170f; color: var(--text);
+  border: 1px solid var(--line); border-radius: 7px;
+  padding: 5px 9px; font-size: 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .5);
+}
+.map-pop .maplibregl-popup-tip { display: none; }
+
+/* The animated dot and the elevation-profile cursor are DOM markers: moving
+   one is a CSS transform, where a one-point GeoJSON source would be re-tiled
+   on every frame. */
+.gl-dot, .gl-cursor {
+  border-radius: 50%; border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .35);
+}
+.gl-dot    { width: 16px; height: 16px; }
+.gl-cursor { width: 13px; height: 13px; }
 
 @media (max-width: 760px) {
   main { flex-direction: column; }
@@ -329,6 +359,9 @@ body.has-scrubber .round-wide { bottom: 66px; }
 body.story #panel, body.story #topbar { display: none; }
 body.story main { height: 100dvh; }
 body.story #profile, body.story #p-show, body.story #scrubber { display: none !important; }
+/* Zoom buttons sit behind the narrative column in story mode, and a story is
+   read by scrolling rather than driven by hand. */
+body.story .maplibregl-ctrl-top-left { display: none; }
 
 #story {
   position: absolute; inset: 0; z-index: 1500; pointer-events: none;

@@ -17,14 +17,13 @@ const MODES = {
 };
 
 // Basemap. Keyless, no account, no quota — VersaTiles serves OpenStreetMap
-// vector tiles (open source, versatiles.org), rendered by MapLibre GL inside
-// Leaflet via maplibre-gl-leaflet so overlays, drawing and the animation are
-// unaffected.
+// vector tiles (open source, versatiles.org), rendered by MapLibre GL, which
+// also draws the route itself and owns the camera.
 //
-// NOTE: this style ships `projection: {type: "globe"}`. Leaflet draws its
-// overlays in Web Mercator, so a globe basemap slides out from under the
-// route lines. forceMercator() below strips that before the style is handed
-// to MapLibre — without it the track does not sit on the map.
+// NOTE: this style ships `projection: {type: "globe"}`, which loadStyle()
+// rewrites to Mercator. That used to be mandatory — Leaflet's overlays were
+// Mercator-only, so a globe slid out from under the route — and is now just
+// a choice about how the map should look.
 const OSM_ATTRIB = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
 
 const BASEMAPS = {
@@ -47,10 +46,13 @@ const state = {
   chapters: [],     // {id, title, text, fromRideId, toRideId, photos:[{url,caption}]}
 };
 
-let map, tileLayer;
-let haloLayer, rideLayer, transferLayer, markerLayer, animLayer;
-let drawHandler = null, drawMode = 'ferry';
-const anim = { raf: null, playing: false, t: 0, dot: null, trail: null, path: [], cum: [], total: 0 };
+let map, mapReady = false;
+let drawMode = 'ferry';
+// In-progress transfer drawing: MapLibre has no draw plugin, and the whole
+// interaction is a vertex list plus a rubber-band segment to the cursor.
+const draw = { on: false, pts: [] };
+const anim = { raf: null, playing: false, t: 0, dot: null, segs: [], trailIds: [],
+               path: [], breaks: new Set(), cum: [], total: 0 };
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 const $  = (s) => document.querySelector(s);
@@ -522,51 +524,241 @@ function recomputeRuns() {
 }
 
 // ── Map ─────────────────────────────────────────────────────────────────────
-// A 2.4px line against a fingertip is close to unhittable. Leaflet's canvas
-// renderer adds `tolerance` to weight/2 when hit-testing, so the tap target
-// grows without the drawn line changing at all.
+// MapLibre GL *is* the map: it owns the camera and draws the route as GL
+// layers. It used to render only the basemap, inside Leaflet, which left
+// Leaflet driving the camera — zoom moved in whole steps, and every pan
+// re-projected and repainted 200k route points onto a 2D canvas on the main
+// thread. Giving both jobs to the GPU is what makes panning and zooming
+// continuous; nothing about the route data changed.
+//
+// Coordinates: the app stores [lat, lon] everywhere, GeoJSON wants [lon, lat].
+// That flip happens only in the feature builders below, so no other code has
+// to think about it.
+
 const COARSE_POINTER = typeof matchMedia === 'function' &&
                        matchMedia('(pointer: coarse)').matches;
+// A 2.4px line against a fingertip is close to unhittable, so a click queries
+// a box around the pointer rather than the exact pixel under it.
 const HIT_TOLERANCE = COARSE_POINTER ? 15 : 5;
 
-function initMap() {
-  map = L.map('map', {
-    preferCanvas: true,
-    renderer: L.canvas({ tolerance: HIT_TOLERANCE }),
-    zoomControl: true,
-  }).setView([46, 6], 5);
-  setBasemap(state.settings.basemap);
-  haloLayer = L.layerGroup().addTo(map);   // below rideLayer: added first
-  rideLayer = L.layerGroup().addTo(map);
-  transferLayer = L.layerGroup().addTo(map);
-  markerLayer = L.layerGroup().addTo(map);
-  animLayer = L.layerGroup().addTo(map);
+const EMPTY = { type: 'FeatureCollection', features: [] };
+const fc = (features) => ({ type: 'FeatureCollection', features });
+
+function lineFeature(pts, props) {
+  const c = new Array(pts.length);
+  for (let i = 0; i < pts.length; i++) c[i] = [pts[i][1], pts[i][0]];
+  return { type: 'Feature', properties: props || {},
+           geometry: { type: 'LineString', coordinates: c } };
+}
+function pointFeature(pt, props) {
+  return { type: 'Feature', properties: props || {},
+           geometry: { type: 'Point', coordinates: [pt[1], pt[0]] } };
+}
+function setData(id, data) {
+  if (!map) return;
+  const src = map.getSource(id);
+  if (src) src.setData(data);
 }
 
-/** Fetch a style and strip any globe projection from it.
+/** [[w, s], [e, n]] for a list of [lat, lon] points, or null if there are none. */
+function boundsOf(pts) {
+  let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+  for (const p of pts) {
+    if (!p) continue;
+    if (p[1] < w) w = p[1];
+    if (p[1] > e) e = p[1];
+    if (p[0] < s) s = p[0];
+    if (p[0] > n) n = p[0];
+  }
+  return isFinite(w) ? [[w, s], [e, n]] : null;
+}
+
+/** Raster OpenStreetMap, used only if the vector style cannot be fetched.
+ *  MapLibre has nothing at all to draw without a style, so the fallback is
+ *  not optional the way it was when Leaflet held the tiles. */
+const RASTER_FALLBACK = {
+  version: 8,
+  sources: {
+    osm: { type: 'raster', tileSize: 256,
+           tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+           attribution: OSM_ATTRIB },
+  },
+  layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+};
+
+/** Fetch the basemap style and pin it to Mercator.
  *
- *  MapLibre honours `projection` in the style document. Leaflet's own layers
- *  are always Web Mercator, so a globe basemap and the route lines disagree
- *  about where everything is. Patching the style up front is deterministic —
- *  calling setProjection() afterwards races the style load.
- *  Falls back to the plain URL if the fetch fails; the map still draws, it
- *  just may be a globe until reload.
+ *  The globe used to be actively wrong: Leaflet drew its overlays in Web
+ *  Mercator, so the basemap slid out from under the route. Every overlay is a
+ *  GL layer now, so a globe would line up — Mercator is kept only because it
+ *  is how the map has always looked. Dropping this one line tries the globe.
  */
-async function forceMercator(url) {
+async function loadStyle(bm) {
   try {
-    const res = await fetch(url);
+    const res = await fetch(bm.style);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const style = await res.json();
     style.projection = { type: 'mercator' };
     return style;
   } catch (e) {
-    return url;
+    toast('Vector basemap unavailable — using plain OpenStreetMap tiles', true);
+    return RASTER_FALLBACK;
   }
 }
 
-/** Leaflet fits bounds to the whole container, but the profile panel and the
- *  scrubber float on top of it. Without this the fitted route runs underneath
- *  them. Returns the space each overlay is covering, in pixels. */
+async function initMap() {
+  const bm = BASEMAPS[state.settings.basemap] || BASEMAPS[Object.keys(BASEMAPS)[0]];
+  const style = await loadStyle(bm);
+
+  map = new maplibregl.Map({
+    container: 'map',
+    style,
+    center: [6, 46],
+    zoom: 3.6,
+    attributionControl: { compact: true },
+    antialias: true,
+    fadeDuration: 150,        // labels crossfade instead of popping mid-zoom
+  });
+  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-left');
+  map.addControl(new maplibregl.ScaleControl({ maxWidth: 110, unit: 'metric' }), 'bottom-left');
+  // Pinch still zooms continuously, but a stray two-finger twist no longer
+  // spins the map out from under someone who meant to scroll.
+  map.touchZoomRotate.disableRotation();
+
+  // Layers need the style, and MapLibre only loads a style once it has a
+  // frame to render into — a background tab renders nothing, so `load` can be
+  // minutes away or never. Resolving as soon as the map object exists lets the
+  // sidebar, the importer and every other control work meanwhile; the map
+  // draws itself when it is finally looked at.
+  map.once('load', () => {
+    addMapLayers();
+    mapReady = true;
+    refreshAll();
+    if (state.rides.length) fitAll({ animate: false });
+  });
+}
+
+/** Every source and layer the app draws into, created once, in paint order.
+ *
+ *  Sources start empty and are filled by setData afterwards, so the drawing
+ *  functions never add or remove layers. A layer that always exists is also a
+ *  stable anchor for slotting the animation trail in at the right depth.
+ */
+function addMapLayers() {
+  ['src-hover', 'src-sel', 'src-rides', 'src-transfers', 'src-draw',
+   'src-ends', 'src-sel-caps']
+    .forEach(id => map.addSource(id, { type: 'geojson', data: EMPTY }));
+
+  map.addLayer({
+    id: 'lyr-hover', type: 'line', source: 'src-hover',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': '#fff', 'line-width': 6, 'line-opacity': .5 },
+  });
+
+  // Selection halo. The soft edge is line-blur, which the 2D canvas could not do.
+  map.addLayer({
+    id: 'lyr-sel-glow', type: 'line', source: 'src-sel',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': ['get', 'color'],
+             'line-width': SELECT_HALO_WEIGHT, 'line-blur': 3 },
+  });
+
+  map.addLayer({
+    id: 'lyr-rides', type: 'line', source: 'src-rides',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': ['get', 'color'],
+      // One fixed pixel width has to suit both a whole continent and a single
+      // valley. The ramp keeps the line in proportion to what is on screen.
+      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1.8, 9, 2.6, 14, 4],
+    },
+  });
+
+  // line-dasharray cannot be data-driven, so each mode gets its own layer.
+  // Leaflet measures dashes in pixels; MapLibre counts them in line widths.
+  Object.entries(MODES).forEach(([key, st]) => {
+    map.addLayer({
+      id: 'lyr-tr-' + key, type: 'line', source: 'src-transfers',
+      filter: ['==', ['get', 'mode'], key],
+      layout: { 'line-join': 'round' },
+      paint: { 'line-color': st.color, 'line-width': 3,
+               'line-dasharray': st.dash.split(',').map(n => +n / 3) },
+    });
+  });
+
+  map.addLayer({
+    id: 'lyr-sel-line', type: 'line', source: 'src-sel',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': '#fff', 'line-width': 2.6, 'line-opacity': .95 },
+  });
+
+  map.addLayer({
+    id: 'lyr-draw-line', type: 'line', source: 'src-draw',
+    filter: ['==', ['geometry-type'], 'LineString'],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': ['get', 'color'], 'line-width': 3,
+             'line-dasharray': [2, 2] },
+  });
+
+  // Anchor layer: trail segments are inserted before this one, so the start
+  // and end markers stay on top of the moving line.
+  map.addLayer({
+    id: 'lyr-ends', type: 'circle', source: 'src-ends',
+    paint: { 'circle-radius': 6, 'circle-color': ['get', 'color'],
+             'circle-stroke-width': 1.5, 'circle-stroke-color': '#15150f' },
+  });
+
+  map.addLayer({
+    id: 'lyr-sel-caps', type: 'circle', source: 'src-sel-caps',
+    paint: { 'circle-radius': 7, 'circle-color': ['get', 'color'],
+             'circle-stroke-width': 2, 'circle-stroke-color': '#15150f' },
+  });
+
+  map.addLayer({
+    id: 'lyr-draw-pts', type: 'circle', source: 'src-draw',
+    filter: ['==', ['geometry-type'], 'Point'],
+    paint: { 'circle-radius': 4, 'circle-color': ['get', 'color'],
+             'circle-stroke-width': 1.5, 'circle-stroke-color': '#15150f' },
+  });
+
+  hoverLabel(['lyr-rides', 'lyr-ends', 'lyr-sel-caps',
+    ...Object.keys(MODES).map(k => 'lyr-tr-' + k)]);
+}
+
+/** Leaflet's bindTooltip, as one shared popup over the named layers.
+ *  Skipped on touch, where there is no hover and a popup only lands on top of
+ *  the tap that was meant to select the ride. */
+function hoverLabel(layers) {
+  if (COARSE_POINTER) return;
+  const pop = new maplibregl.Popup({
+    closeButton: false, closeOnClick: false, offset: 12, className: 'map-pop',
+  });
+  layers.forEach(id => {
+    map.on('mousemove', id, (e) => {
+      if (draw.on) return;
+      const f = e.features && e.features[0];
+      if (!f || !f.properties || !f.properties.label) return;
+      map.getCanvas().style.cursor = 'pointer';
+      pop.setLngLat(e.lngLat).setText(f.properties.label).addTo(map);
+    });
+    map.on('mouseleave', id, () => {
+      map.getCanvas().style.cursor = draw.on ? 'crosshair' : '';
+      pop.remove();
+    });
+  });
+}
+
+/** Which rides are under the pointer, within the tap tolerance. */
+function ridesAt(point) {
+  if (!mapReady) return [];
+  const t = HIT_TOLERANCE;
+  return map.queryRenderedFeatures(
+    [[point.x - t, point.y - t], [point.x + t, point.y + t]],
+    { layers: ['lyr-rides'] });
+}
+
+/** The profile panel and the scrubber float over the map. Without this the
+ *  fitted route runs underneath them. Returns what each is covering, in px. */
 function mapPadding() {
   const bottomOf = (sel) => {
     const el = $(sel);
@@ -581,62 +773,24 @@ function mapPadding() {
   return { top, bottom: Math.max(bottom, 16) };
 }
 
-/** fitBounds that keeps the route clear of the floating panels. */
-function fitBoundsPadded(bounds) {
-  if (!bounds || !bounds.isValid || !bounds.isValid()) return;
+/** fitBounds that keeps the route clear of the floating panels.
+ *  Animated by default now that the camera can afford it; callers that would
+ *  rather not watch a flight (first paint, loading a shared link) opt out. */
+function fitBoundsPadded(bounds, opts) {
+  if (!bounds || !map || !mapReady) return;
   const p = mapPadding();
   map.fitBounds(bounds, {
-    paddingTopLeft: [16, p.top],
-    paddingBottomRight: [16, p.bottom],
-    animate: false,
+    padding: { top: p.top, bottom: p.bottom, left: 16, right: 16 },
+    maxZoom: 14,
+    animate: !(opts && opts.animate === false),
+    duration: 650,
+    essential: true,
   });
 }
 
-/** Tell Leaflet the container changed size. Cheap, and safe to over-call. */
 function resizeMap() {
   if (!map) return;
-  requestAnimationFrame(() => map.invalidateSize({ animate: false }));
-}
-
-function setBasemap(kind) {
-  const bm = BASEMAPS[kind] || BASEMAPS[Object.keys(BASEMAPS)[0]];
-  const attribution = bm.attribution || OSM_ATTRIB;
-  if (tileLayer) { map.removeLayer(tileLayer); tileLayer = null; }
-
-  if (bm.type === 'vector' && typeof L.maplibreGL === 'function') {
-    const token = ++basemapToken;
-    forceMercator(bm.style).then(style => {
-      if (token !== basemapToken) return;   // a later switch won the race
-      if (tileLayer) { map.removeLayer(tileLayer); }
-      tileLayer = L.maplibreGL({ style, attribution }).addTo(map);
-      if (tileLayer.bringToBack) tileLayer.bringToBack();
-    });
-    return;
-  }
-
-  if (bm.type === 'vector') {
-    // MapLibre failed to load (offline, blocked CDN) — fall back to plain OSM
-    // raster rather than leaving the map blank.
-    log_fallback();
-    tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: OSM_ATTRIB, maxZoom: 19,
-    }).addTo(map);
-  } else {
-    const opts = { attribution, maxZoom: bm.maxZoom || 18 };
-    if (bm.subdomains) opts.subdomains = bm.subdomains;
-    tileLayer = L.tileLayer(bm.url, opts).addTo(map);
-  }
-  if (tileLayer && tileLayer.bringToBack) tileLayer.bringToBack();
-}
-
-// Guards against an older style arriving after a newer one was chosen.
-let basemapToken = 0;
-
-let warnedFallback = false;
-function log_fallback() {
-  if (warnedFallback) return;
-  warnedFallback = true;
-  toast('Vector basemap unavailable — using plain OpenStreetMap tiles', true);
+  requestAnimationFrame(() => map.resize());
 }
 
 /** Blue (earliest) → the brand colour (most recent). */
@@ -675,50 +829,43 @@ const SELECT_HALO_WEIGHT = 13;
 const SELECT_HALO_ALPHA  = 0.55;
 
 function drawRides() {
-  haloLayer.clearLayers();
-  rideLayer.clearLayers();
-  markerLayer.clearLayers();
+  if (!mapReady) return;
   const eps = state.settings.simplify;
-  state.rides.forEach((ride, i) => {
-    const pts = simplify(ride.points, eps);
-    const rgb = rideRGB(i, state.rides.length);
 
-    // No halo here — it is the selection cue, drawn by highlightRide() for one
-    // ride at a time. On every ride at once it was just visual noise.
-    L.polyline(pts, {
-      color: shade(rgb, LINE_DARKEN), weight: 2.4, opacity: 1,
-      lineCap: 'round', lineJoin: 'round',
-      // A thin line is hard to hit, especially on a phone.
-      bubblingMouseEvents: false,
-    }).bindTooltip(`${ride.date.slice(0, 10)} — ${ride.name} (${fmtKm(ride.dist)} km)`)
-      .on('click', (e) => { L.DomEvent.stop(e); showRideProfile(ride); })
-      .addTo(rideLayer);
-  });
+  setData('src-rides', fc(state.rides.map((ride, i) => lineFeature(
+    simplify(ride.points, eps), {
+      id: ride.id,
+      // No halo here — that is the selection cue, drawn by highlightRide for
+      // one ride at a time. On every ride at once it was just visual noise.
+      color: shade(rideRGB(i, state.rides.length), LINE_DARKEN),
+      label: `${ride.date.slice(0, 10)} — ${ride.name} (${fmtKm(ride.dist)} km)`,
+    }))));
 
+  const ends = [];
   if (state.rides.length) {
     const first = state.rides[0], last = state.rides[state.rides.length - 1];
-    L.circleMarker(first.points[0], { radius: 6, color: '#8fbf6f', fillColor: '#8fbf6f', fillOpacity: 1, weight: 2 })
-      .bindTooltip(`Start — ${first.date.slice(0, 10)}`).addTo(markerLayer);
-    L.circleMarker(last.points[last.points.length - 1], { radius: 6, color: state.settings.brand, fillColor: state.settings.brand, fillOpacity: 1, weight: 2 })
-      .bindTooltip(`Latest — ${last.date.slice(0, 10)}`).addTo(markerLayer);
+    ends.push(pointFeature(first.points[0], {
+      color: '#8fbf6f', label: `Start — ${first.date.slice(0, 10)}` }));
+    ends.push(pointFeature(last.points[last.points.length - 1], {
+      color: state.settings.brand, label: `Latest — ${last.date.slice(0, 10)}` }));
   }
+  setData('src-ends', fc(ends));
 }
 
 function drawTransfers() {
-  transferLayer.clearLayers();
-  state.transfers.forEach(t => {
+  if (!mapReady) return;
+  setData('src-transfers', fc(state.transfers.map(t => {
     const st = MODES[t.mode] || MODES.other;
-    L.polyline(t.points, { color: st.color, weight: 3, opacity: .95, dashArray: st.dash })
-      .bindTooltip(t.label || st.label)
-      .addTo(transferLayer);
-  });
+    return lineFeature(t.points, { mode: MODES[t.mode] ? t.mode : 'other',
+                                   label: t.label || st.label });
+  })));
 }
 
-function fitAll() {
+function fitAll(opts) {
   const all = [];
   state.rides.forEach(r => all.push(r.points[0], r.points[r.points.length - 1]));
   state.transfers.forEach(t => { for (const p of t.points) all.push(p); });
-  if (all.length) fitBoundsPadded(L.latLngBounds(all));
+  fitBoundsPadded(boundsOf(all), opts);
 }
 
 // ── Drawing transfers ───────────────────────────────────────────────────────
@@ -739,25 +886,54 @@ function buildModePicker() {
 }
 
 function startDrawing() {
-  if (drawHandler) { drawHandler.disable(); drawHandler = null; }
-  const st = MODES[drawMode];
-  drawHandler = new L.Draw.Polyline(map, {
-    shapeOptions: { color: st.color, weight: 3, dashArray: st.dash },
-  });
-  drawHandler.enable();
+  if (!mapReady) return;
+  draw.on = true;
+  draw.pts = [];
+  map.getCanvas().style.cursor = 'crosshair';
+  map.doubleClickZoom.disable();
+  renderDraw();
   $('#draw-hint').hidden = false;
   $('#btn-draw').textContent = 'Drawing… (Esc to cancel)';
 }
 
 function stopDrawing() {
-  if (drawHandler) { drawHandler.disable(); drawHandler = null; }
+  draw.on = false;
+  draw.pts = [];
+  if (map) {
+    map.getCanvas().style.cursor = '';
+    map.doubleClickZoom.enable();
+    renderDraw();
+  }
   $('#draw-hint').hidden = true;
   $('#btn-draw').textContent = 'Start drawing';
 }
 
-function onDrawCreated(e) {
-  const pts = e.layer.getLatLngs().map(ll => [ll.lat, ll.lng]);
+/** The vertices so far, plus a rubber band out to the cursor. */
+function renderDraw(cursor) {
+  if (!mapReady) return;
+  if (!draw.on) { setData('src-draw', EMPTY); return; }
+  const color = (MODES[drawMode] || MODES.other).color;
+  const feats = draw.pts.map(p => pointFeature(p, { color }));
+  const line = draw.pts.slice();
+  if (cursor) line.push([cursor.lat, cursor.lng]);
+  if (line.length > 1) feats.push(lineFeature(line, { color }));
+  setData('src-draw', fc(feats));
+}
+
+/** Finish the line being drawn and keep it as a transfer.
+ *
+ *  A double-click fires two clicks of its own first, so the last vertex or two
+ *  are the same point landed on twice. Dropping trailing near-duplicates is
+ *  what stops every drawn line ending in a stutter. */
+function finishDrawing() {
+  const pts = draw.pts.slice();
+  while (pts.length > 2) {
+    const a = pts[pts.length - 1], b = pts[pts.length - 2];
+    if (haversineKm(a, b) * 1000 > 25) break;   // 25 m apart is a real vertex
+    pts.pop();
+  }
   if (pts.length < 2) { stopDrawing(); return; }
+
   const typed = $('#transfer-label').value.trim();
   state.transfers.push({
     id: uid(), mode: drawMode,
@@ -769,6 +945,25 @@ function onDrawCreated(e) {
   toast(`Added ${MODES[drawMode].label.toLowerCase()} (${fmtKm(pathKm(pts))} km)`);
   refreshAll();
   persist();
+}
+
+/** Clicks, the rubber band and the finishing gestures, wired once at startup. */
+function bindDrawing() {
+  map.on('click', (e) => {
+    if (!draw.on) return;
+    draw.pts.push([e.lngLat.lat, e.lngLat.lng]);
+    renderDraw(e.lngLat);
+  });
+  map.on('mousemove', (e) => { if (draw.on) renderDraw(e.lngLat); });
+  map.on('dblclick', (e) => {
+    if (!draw.on) return;
+    e.preventDefault();
+    finishDrawing();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (!draw.on) return;
+    if (e.key === 'Enter') finishDrawing();
+  });
 }
 
 // ── Animation ───────────────────────────────────────────────────────────────
@@ -806,10 +1001,6 @@ function prepareAnim() {
 
   anim.path = out.pts;
   anim.breaks = out.breaks;
-  // The reusable layers belong to the old path — drop them.
-  animLayer.clearLayers();
-  anim.dot = null;
-  anim.trails = [];
 
   const pts = anim.path, breaks = anim.breaks;
   anim.cum = [0];
@@ -819,7 +1010,67 @@ function prepareAnim() {
     anim.cum.push(total);           // zero-length step: the dot teleports
   }
   anim.total = total;
+  buildTrailLayers();
   $('#scrubber').hidden = pts.length < 2;
+}
+
+/** One GL line per continuous run, uploaded once.
+ *
+ *  The trail used to be rebuilt and re-projected every frame. Here the
+ *  geometry is sent to the GPU once and the frame only moves where the line
+ *  stops being drawn, via a line-gradient. Revealing it costs a paint-property
+ *  change rather than a geometry upload, so frame cost no longer scales with
+ *  how much of the journey is on screen.
+ */
+function buildTrailLayers() {
+  if (!mapReady) return;
+  anim.trailIds.forEach(id => {
+    if (map.getLayer('lyr-' + id)) map.removeLayer('lyr-' + id);
+    if (map.getSource('src-' + id)) map.removeSource('src-' + id);
+  });
+  anim.trailIds = [];
+  anim.segs = [];
+
+  const pts = anim.path;
+  if (pts.length < 2) return;
+
+  let start = 0;
+  const flush = (end) => {
+    if (end - start >= 2) anim.segs.push({ i0: start, i1: end - 1 });
+    start = end;
+  };
+  for (let i = 1; i < pts.length; i++) if (anim.breaks.has(i)) flush(i);
+  flush(pts.length);
+
+  anim.segs.forEach((seg, i) => {
+    const id = 'trail-' + i;
+    anim.trailIds.push(id);
+    seg.d0 = anim.cum[seg.i0];
+    seg.d1 = anim.cum[seg.i1];
+    map.addSource('src-' + id, {
+      type: 'geojson',
+      lineMetrics: true,                 // required for line-gradient
+      data: lineFeature(pts.slice(seg.i0, seg.i1 + 1), {}),
+    });
+    map.addLayer({
+      id: 'lyr-' + id, type: 'line', source: 'src-' + id,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-width': 4, 'line-opacity': 0 },
+    }, 'lyr-ends');
+  });
+}
+
+/** Solid up to `f` along the line, then nothing. Interpolation stops have to
+ *  rise strictly, so f is held just inside both ends. */
+function trailGradient(f, color) {
+  if (!isFinite(f)) f = 0;        // Math.max(x, NaN) is NaN, and NaN stops
+  if (f >= 1) {                   // make MapLibre reject the whole expression
+    return ['interpolate', ['linear'], ['line-progress'], 0, color, 1, color];
+  }
+  const a = Math.min(.997, Math.max(.001, f));
+  return ['interpolate', ['linear'], ['line-progress'],
+          0, color, a, color,
+          a + .001, 'rgba(0,0,0,0)', 1, 'rgba(0,0,0,0)'];
 }
 
 // ── Chapters ────────────────────────────────────────────────────────────────
@@ -885,51 +1136,34 @@ function atFraction(f) {
 
 function renderAnim() {
   const at = atFraction(anim.t);
-  if (!at) return;
+  if (!at || !mapReady) return;
 
-  // Layers are created once and updated in place. Rebuilding them every frame meant
-  // allocating and re-projecting the whole line sixty times a second.
+  // A DOM marker is a CSS transform per frame, which beats re-tiling a
+  // one-point GeoJSON source sixty times a second.
   if (!anim.dot) {
-    anim.dot = L.circleMarker(at.pos, {
-      radius: 7, color: '#fff', weight: 2,
-      fillColor: state.settings.brand, fillOpacity: 1,
-    }).addTo(animLayer);
-    anim.trails = [];
+    const el = document.createElement('div');
+    el.className = 'gl-dot';
+    anim.dot = new maplibregl.Marker({ element: el }).setLngLat([0, 0]).addTo(map);
   }
+  anim.dot.getElement().style.background = state.settings.brand;
+  anim.dot.setLngLat([at.pos[1], at.pos[0]]);
 
-  if ($('#trail').value === 'draw') {
-    // Break the trail at run boundaries so it never spans an undrawn gap.
-    const head = anim.path.slice(0, at.idx);
-    head.push(at.pos);
-    const segs = [];
-    let seg = [];
-    for (let i = 0; i < head.length; i++) {
-      if (anim.breaks.has(i) && seg.length > 1) { segs.push(seg); seg = []; }
-      seg.push(head[i]);
-    }
-    if (seg.length > 1) segs.push(seg);
-
-    segs.forEach((s, i) => {
-      if (!anim.trails[i]) {
-        anim.trails[i] = L.polyline(s, {
-          color: state.settings.brand, weight: 4, opacity: .95,
-        }).addTo(animLayer);
-      } else {
-        anim.trails[i].setLatLngs(s);
-        anim.trails[i].setStyle({ color: state.settings.brand });
-      }
-    });
-    for (let i = segs.length; i < anim.trails.length; i++) anim.trails[i].setLatLngs([]);
-  } else if (anim.trails) {
-    anim.trails.forEach(t => t.setLatLngs([]));
-  }
-
-  anim.dot.setLatLng(at.pos);
-  anim.dot.setStyle({ fillColor: state.settings.brand });
-
-  if ($('#follow').checked) map.panTo(at.pos, { animate: false });
-
+  const drawTrail = $('#trail').value === 'draw';
   const done = anim.t * anim.total;
+  anim.segs.forEach((seg, i) => {
+    const id = 'lyr-trail-' + i;
+    if (!map.getLayer(id)) return;
+    if (!drawTrail) { map.setPaintProperty(id, 'line-opacity', 0); return; }
+    const span = seg.d1 - seg.d0;
+    const f = span <= 0 ? (done >= seg.d1 ? 1 : 0)
+                        : Math.min(1, Math.max(0, (done - seg.d0) / span));
+    if (f <= 0) { map.setPaintProperty(id, 'line-opacity', 0); return; }
+    map.setPaintProperty(id, 'line-opacity', .95);
+    map.setPaintProperty(id, 'line-gradient', trailGradient(f, state.settings.brand));
+  });
+
+  if ($('#follow').checked) map.jumpTo({ center: [at.pos[1], at.pos[0]] });
+
   $('#progress').value = Math.round(anim.t * 1000);
   $('#progress-label').textContent = `${fmtKm(done)} / ${fmtKm(anim.total)} km`;
   $('#anim-readout').innerHTML =
@@ -1075,12 +1309,15 @@ function renderTransfers() {
     : 'No transfers yet';
 }
 
-let hl = null;
 function highlight(pts) {
-  clearHighlight();
-  hl = L.polyline(pts, { color: '#fff', weight: 6, opacity: .5 }).addTo(map);
+  if (!mapReady || !pts || pts.length < 2) return;
+  // Coarsened here rather than at the call sites: hovering a chapter hands
+  // this every point of every ride it spans, and a hover cue does not need
+  // a quarter of a million coordinates re-serialised to say "this bit".
+  setData('src-hover',
+    fc([lineFeature(simplify(pts, Math.max(state.settings.simplify, 25)), {})]));
 }
-function clearHighlight() { if (hl) { map.removeLayer(hl); hl = null; } }
+function clearHighlight() { setData('src-hover', EMPTY); }
 
 function escapeHTML(s) {
   return String(s).replace(/[&<>"']/g, c =>
@@ -1173,7 +1410,6 @@ function load(data) {
   if (!(state.settings.basemap in BASEMAPS)) {
     state.settings.basemap = Object.keys(BASEMAPS)[0];
   }
-  setBasemap(state.settings.basemap);
   refreshAll();
   if (state.rides.length) fitAll();
 }
@@ -1262,7 +1498,6 @@ function shareableHTML() {
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHTML(state.name)}</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
 <style>
  html,body{height:100%;margin:0;background:#0d0d0a;color:#f0ebe3;
@@ -1287,45 +1522,33 @@ function shareableHTML() {
    background:rgba(12,12,9,.82);border-radius:8px;padding:9px 12px;font-size:11px}
  #legend div{display:flex;align-items:center;gap:8px;margin:3px 0}
  #legend i{width:26px;height:0;border-top:3px dashed;display:block}
+ .dot{width:16px;height:16px;border-radius:50%;border:2px solid #fff;
+   background:${state.settings.brand};box-shadow:0 0 0 1px rgba(0,0,0,.35)}
+ .maplibregl-popup-content{background:#17170f;color:#f0ebe3;border:1px solid #34342e;
+   border-radius:7px;padding:5px 9px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.5)}
+ .maplibregl-popup-tip{display:none}
 </style></head><body>
 <div id="map"></div>
 <div id="title"><h1>${escapeHTML(state.name)}</h1><small id="sub"></small><small id="sub2"></small></div>
 <div id="legend"></div>
 <div id="bar"><button id="pp">▶</button><input id="pr" type="range" min="0" max="1000" value="0"><span id="lbl"></span></div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
 <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"><\/script>
-<script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"><\/script>
 <script>
 const D=${JSON.stringify(payload)};
 const MODES=${JSON.stringify(MODES)};
 const TILES=${JSON.stringify(BASEMAPS)};
-const map=L.map('map',{preferCanvas:true}).setView([46,6],5);
+const BRAND=${JSON.stringify(state.settings.brand)};
+const OSM=${JSON.stringify(OSM_ATTRIB)};
 const bm=TILES[D.basemap]||TILES[Object.keys(TILES)[0]];
-if(bm.type==='vector'&&typeof L.maplibreGL==='function'){
-  /* strip any globe projection: Leaflet overlays are Web Mercator */
-  fetch(bm.style).then(r=>r.json()).then(st=>{
-    st.projection={type:'mercator'};
-    L.maplibreGL({style:st,attribution:bm.attribution}).addTo(map).bringToBack();
-  }).catch(()=>{
-    L.maplibreGL({style:bm.style,attribution:bm.attribution}).addTo(map);
-  });
-}else if(bm.type==='vector'){
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:bm.attribution,maxZoom:19}).addTo(map);
-}else{
-  L.tileLayer(bm.url,Object.assign({attribution:bm.attribution,maxZoom:bm.maxZoom||18},bm.subdomains?{subdomains:bm.subdomains}:{})).addTo(map);
-}
-const all=[];
-D.rides.forEach(r=>{L.polyline(r.p,{color:r.c,weight:2.4,opacity:1,lineCap:'round',lineJoin:'round'})
-  .bindTooltip(r.d+' — '+r.n+' ('+r.km+' km)').addTo(map);all.push(r.p[0],r.p[r.p.length-1]);});
-const used={};
-D.transfers.forEach(t=>{const s=MODES[t.m]||MODES.other;used[t.m]=1;
-  L.polyline(t.p,{color:s.color,weight:3,opacity:.95,dashArray:s.dash})
-   .bindTooltip(t.l).addTo(map);t.p.forEach(p=>all.push(p));});
-if(all.length)map.fitBounds(L.latLngBounds(all).pad(.08));
-const lg=document.getElementById('legend');
-Object.keys(used).forEach(m=>{const s=MODES[m];
-  lg.insertAdjacentHTML('beforeend','<div><i style="border-color:'+s.color+'"></i>'+s.label+'</div>');});
-if(!Object.keys(used).length)lg.style.display='none';
+/* MapLibre draws the route as well as the basemap, so panning and zooming
+   stay on the GPU no matter how long the journey is. */
+const RASTER={version:8,sources:{osm:{type:'raster',tileSize:256,
+ tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],attribution:OSM}},
+ layers:[{id:'osm',type:'raster',source:'osm'}]};
+function ln(p,props){const c=new Array(p.length);
+ for(let i=0;i<p.length;i++)c[i]=[p[i][1],p[i][0]];
+ return{type:'Feature',properties:props||{},geometry:{type:'LineString',coordinates:c}};}
+function fc(f){return{type:'FeatureCollection',features:f};}
 
 const path=[],brk=new Set();
 D.runs.forEach(r=>{if(path.length)brk.add(path.length);r.forEach(p=>path.push(p));});
@@ -1335,6 +1558,12 @@ function hav(a,b){const R=6371,r=Math.PI/180,dla=(b[0]-a[0])*r,dlo=(b[1]-a[1])*r
  return 2*R*Math.asin(Math.sqrt(s));}
 /* zero-length across run boundaries: the dot jumps an undrawn gap */
 for(let i=1;i<path.length;i++){if(!brk.has(i))tot+=hav(path[i-1],path[i]);cum.push(tot);}
+function at(f){const g=f*tot;let lo=0,hi=cum.length-1;
+ while(lo<hi){const m=(lo+hi)>>1;if(cum[m]<g)lo=m+1;else hi=m;}
+ const i=Math.max(1,lo),seg=cum[i]-cum[i-1]||1e-9;
+ const r=Math.min(1,Math.max(0,(g-cum[i-1])/seg)),a=path[i-1],b=path[i];
+ return{pos:[a[0]+(b[0]-a[0])*r,a[1]+(b[1]-a[1])*r],idx:i};}
+
 /* Ridden figures only. The animated total below includes transfers,
    which is not what these numbers are for. */
 (function(){
@@ -1348,23 +1577,8 @@ for(let i=1;i<path.length;i++){if(!brk.has(i))tot+=hav(path[i-1],path[i]);cum.pu
     if(e) e.textContent='plus '+S.transferKm.toLocaleString()+' km by ferry, train or bus';
   }
 })();
-let t=0,playing=false,raf,last=0,dot,head;
-function at(f){const g=f*tot;let lo=0,hi=cum.length-1;
- while(lo<hi){const m=(lo+hi)>>1;if(cum[m]<g)lo=m+1;else hi=m;}
- const i=Math.max(1,lo),seg=cum[i]-cum[i-1]||1e-9;
- const r=Math.min(1,Math.max(0,(g-cum[i-1])/seg)),a=path[i-1],b=path[i];
- return{pos:[a[0]+(b[0]-a[0])*r,a[1]+(b[1]-a[1])*r],idx:i};}
-function render(){if(path.length<2)return;const p=at(t);
- if(head)head.forEach(h=>map.removeLayer(h));if(dot)map.removeLayer(dot);
- const pts=path.slice(0,p.idx).concat([p.pos]);head=[];let seg=[];
- for(let i=0;i<pts.length;i++){if(brk.has(i)&&seg.length>1){
-   head.push(L.polyline(seg,{color:'${state.settings.brand}',weight:4,opacity:.95}).addTo(map));seg=[];}
-  seg.push(pts[i]);}
- if(seg.length>1)head.push(L.polyline(seg,{color:'${state.settings.brand}',weight:4,opacity:.95}).addTo(map));
- dot=L.circleMarker(p.pos,{radius:7,color:'#fff',weight:2,
-   fillColor:'${state.settings.brand}',fillOpacity:1}).addTo(map);
- document.getElementById('pr').value=Math.round(t*1000);
- document.getElementById('lbl').textContent=Math.round(t*tot).toLocaleString()+' / '+Math.round(tot).toLocaleString()+' km';}
+
+let t=0,playing=false,raf,last=0,render=function(){};
 function step(ts){if(!playing)return;if(!last)last=ts;
  t+=((ts-last)/1000)/40;last=ts;if(t>=1){t=1;play(false);}render();
  if(playing)raf=requestAnimationFrame(step);}
@@ -1372,7 +1586,88 @@ function play(on){playing=on;last=0;document.getElementById('pp').textContent=on
  if(on){if(t>=1)t=0;raf=requestAnimationFrame(step);}else if(raf)cancelAnimationFrame(raf);}
 document.getElementById('pp').onclick=()=>play(!playing);
 document.getElementById('pr').oninput=e=>{play(false);t=e.target.value/1000;render();};
-render();
+
+fetch(bm.style).then(r=>r.json()).then(st=>{st.projection={type:'mercator'};return st;})
+ .catch(()=>RASTER).then(style=>{
+  const map=new maplibregl.Map({container:'map',style,center:[6,46],zoom:3.6,
+    attributionControl:{compact:true},antialias:true,fadeDuration:150});
+  map.addControl(new maplibregl.NavigationControl(),'top-left');
+  map.touchZoomRotate.disableRotation();
+  map.on('load',()=>build(map));
+ });
+
+function build(map){
+ const all=[];
+ map.addSource('rides',{type:'geojson',data:fc(D.rides.map(r=>{
+   all.push(r.p[0],r.p[r.p.length-1]);
+   return ln(r.p,{color:r.c,label:r.d+' — '+r.n+' ('+r.km+' km)'});}))});
+ map.addLayer({id:'rides',type:'line',source:'rides',
+   layout:{'line-cap':'round','line-join':'round'},
+   paint:{'line-color':['get','color'],
+     'line-width':['interpolate',['linear'],['zoom'],4,1.8,9,2.6,14,4]}});
+
+ const used={};
+ map.addSource('tr',{type:'geojson',data:fc(D.transfers.map(x=>{
+   const m=MODES[x.m]?x.m:'other';used[m]=1;x.p.forEach(p=>all.push(p));
+   return ln(x.p,{mode:m,label:x.l||MODES[m].label});}))});
+ /* line-dasharray cannot be data-driven, so one layer per mode */
+ Object.keys(MODES).forEach(k=>{const st=MODES[k];
+   map.addLayer({id:'tr-'+k,type:'line',source:'tr',filter:['==',['get','mode'],k],
+     layout:{'line-join':'round'},
+     paint:{'line-color':st.color,'line-width':3,
+       'line-dasharray':st.dash.split(',').map(n=>+n/3)}});});
+
+ /* One GL line per continuous run, uploaded once. Revealing the trail is a
+    gradient stop moving along it, not a geometry rebuild every frame. */
+ const segs=[];
+ (function(){let s0=0;const flush=end=>{if(end-s0>=2)segs.push({i0:s0,i1:end-1});s0=end;};
+  for(let i=1;i<path.length;i++)if(brk.has(i))flush(i);flush(path.length);})();
+ segs.forEach((g,i)=>{g.d0=cum[g.i0];g.d1=cum[g.i1];
+  map.addSource('tseg'+i,{type:'geojson',lineMetrics:true,
+    data:ln(path.slice(g.i0,g.i1+1),{})});
+  map.addLayer({id:'tseg'+i,type:'line',source:'tseg'+i,
+    layout:{'line-cap':'round','line-join':'round'},
+    paint:{'line-width':4,'line-opacity':0}});});
+
+ const el=document.createElement('div');el.className='dot';
+ const dot=new maplibregl.Marker({element:el}).setLngLat([0,0]).addTo(map);
+
+ function grad(f){if(f>=1)return['interpolate',['linear'],['line-progress'],0,BRAND,1,BRAND];
+  const a=Math.min(.997,Math.max(.001,f));
+  return['interpolate',['linear'],['line-progress'],0,BRAND,a,BRAND,
+         a+.001,'rgba(0,0,0,0)',1,'rgba(0,0,0,0)'];}
+
+ render=function(){if(path.length<2)return;const p=at(t),done=t*tot;
+  dot.setLngLat([p.pos[1],p.pos[0]]);
+  segs.forEach((g,i)=>{const id='tseg'+i,span=g.d1-g.d0;
+   const f=span<=0?(done>=g.d1?1:0):Math.min(1,Math.max(0,(done-g.d0)/span));
+   if(f<=0){map.setPaintProperty(id,'line-opacity',0);return;}
+   map.setPaintProperty(id,'line-opacity',.95);
+   map.setPaintProperty(id,'line-gradient',grad(f));});
+  document.getElementById('pr').value=Math.round(t*1000);
+  document.getElementById('lbl').textContent=
+    Math.round(done).toLocaleString()+' / '+Math.round(tot).toLocaleString()+' km';};
+
+ let w=Infinity,s=Infinity,e=-Infinity,n=-Infinity;
+ all.forEach(p=>{if(p[1]<w)w=p[1];if(p[1]>e)e=p[1];if(p[0]<s)s=p[0];if(p[0]>n)n=p[0];});
+ if(isFinite(w))map.fitBounds([[w,s],[e,n]],
+   {padding:{top:92,bottom:84,left:30,right:30},animate:false,maxZoom:13});
+
+ const lg=document.getElementById('legend');
+ Object.keys(used).forEach(m=>{const st=MODES[m];
+  lg.insertAdjacentHTML('beforeend','<div><i style="border-color:'+st.color+'"></i>'+st.label+'</div>');});
+ if(!Object.keys(used).length)lg.style.display='none';
+
+ const pop=new maplibregl.Popup({closeButton:false,closeOnClick:false,offset:12});
+ ['rides'].concat(Object.keys(MODES).map(k=>'tr-'+k)).forEach(id=>{
+  map.on('mousemove',id,ev=>{const f=ev.features&&ev.features[0];
+   if(!f||!f.properties.label)return;
+   map.getCanvas().style.cursor='pointer';
+   pop.setLngLat(ev.lngLat).setText(f.properties.label).addTo(map);});
+  map.on('mouseleave',id,()=>{map.getCanvas().style.cursor='';pop.remove();});});
+
+ render();
+}
 <\/script></body></html>`;
 }
 
@@ -1574,11 +1869,12 @@ function profileAt(clientX) {
   if (cur) { cur.setAttribute('x1', px); cur.setAttribute('x2', px); cur.setAttribute('opacity', '1'); }
 
   if (!profile.marker) {
-    profile.marker = L.circleMarker(s.pt, { radius: 6, color: '#fff', weight: 2,
-      fillColor: state.settings.brand, fillOpacity: 1 }).addTo(map);
-  } else {
-    profile.marker.setLatLng(s.pt);
+    const el = document.createElement('div');
+    el.className = 'gl-cursor';
+    profile.marker = new maplibregl.Marker({ element: el }).setLngLat([0, 0]).addTo(map);
   }
+  profile.marker.getElement().style.background = state.settings.brand;
+  profile.marker.setLngLat([s.pt[1], s.pt[0]]);
   $('#p-readout').textContent =
     `${fmtKm(s.km)} km · ${Math.round(s.ele).toLocaleString()} m`;
 }
@@ -1586,7 +1882,7 @@ function profileAt(clientX) {
 function clearProfileCursor() {
   const cur = $('#p-svg').querySelector('#p-cursor');
   if (cur) cur.setAttribute('opacity', '0');
-  if (profile.marker) { map.removeLayer(profile.marker); profile.marker = null; }
+  if (profile.marker) { profile.marker.remove(); profile.marker = null; }
   $('#p-readout').textContent = '';
 }
 
@@ -1662,52 +1958,29 @@ let rideHighlight = null;          // [layers] — glow, line and end caps
  *  profile panel is on screen and its height is known.
  */
 function highlightRide(ride) {
-  clearRideHighlight();
+  if (!mapReady) return;
   const i = state.rides.indexOf(ride);
   const rgb = rideRGB(i < 0 ? state.rides.length - 1 : i, state.rides.length);
   const pts = simplify(ride.points, state.settings.simplify);
   const a = pts[0], b = pts[pts.length - 1];
 
-  const glow = L.polyline(pts, {
-    color: rgba(rgb, SELECT_HALO_ALPHA), weight: SELECT_HALO_WEIGHT,
-    lineCap: 'round', lineJoin: 'round', interactive: false,
-  }).addTo(haloLayer);
-
-  const line = L.polyline(pts, {
-    color: '#fff', weight: 2.6, opacity: .95,
-    lineCap: 'round', lineJoin: 'round', interactive: false,
-  }).addTo(haloLayer);
-
-  const cap = (pt, fill, label) =>
-    L.circleMarker(pt, { radius: 7, color: '#15150f', weight: 2,
-                         fillColor: fill, fillOpacity: 1, interactive: true })
-     .bindTooltip(label, { direction: 'top' })
-     .addTo(haloLayer);
-
-  rideHighlight = [
-    glow, line,
-    cap(a, '#8fbf6f', `Start — ${ride.date.slice(0, 10)}`),
-    cap(b, shade(rgb, 1.15), `End — ${fmtKm(ride.dist)} km`),
-  ];
-}
-
-/** Is this map point within `px` screen pixels of the ride's line? */
-function nearRide(latlng, ride, px) {
-  const p = map.latLngToLayerPoint(latlng);
-  const pts = simplify(ride.points, Math.max(state.settings.simplify, 25));
-  for (const c of pts) {
-    if (map.latLngToLayerPoint(L.latLng(c[0], c[1])).distanceTo(p) <= px) return true;
-  }
-  return false;
+  // One source feeds both the glow and the white line over it.
+  setData('src-sel', fc([lineFeature(pts, { color: rgba(rgb, SELECT_HALO_ALPHA) })]));
+  setData('src-sel-caps', fc([
+    pointFeature(a, { color: '#8fbf6f', label: `Start — ${ride.date.slice(0, 10)}` }),
+    pointFeature(b, { color: shade(rgb, 1.15), label: `End — ${fmtKm(ride.dist)} km` }),
+  ]));
+  rideHighlight = true;
 }
 
 function fitToRide(ride) {
-  fitBoundsPadded(L.latLngBounds(simplify(ride.points, state.settings.simplify)));
+  fitBoundsPadded(boundsOf(simplify(ride.points, state.settings.simplify)));
 }
 
 function clearRideHighlight() {
   if (!rideHighlight) return;
-  rideHighlight.forEach(l => haloLayer.removeLayer(l));
+  setData('src-sel', EMPTY);
+  setData('src-sel-caps', EMPTY);
   rideHighlight = null;
 }
 
@@ -1984,9 +2257,13 @@ function onStoryScroll() {
       const narrow = window.innerWidth <= 760;
       const offset = narrow ? [0, -wrap.clientHeight / 3]
                             : [wrap.clientWidth / 2, 0];
-      const target = map.project(L.latLng(at.pos[0], at.pos[1]))
-                        .subtract(L.point(offset[0], offset[1]));
-      map.panTo(map.unproject(target), { animate: true, duration: 0.5, noMoveStart: true });
+      // easeTo places the given centre `offset` pixels from the container
+      // centre, which is exactly the shift the narrative column needs — the
+      // manual project/unproject round trip is gone.
+      map.easeTo({
+        center: [at.pos[1], at.pos[0]], offset,
+        duration: 500, essential: true,
+      });
     }
   });
 }
@@ -2152,7 +2429,7 @@ function showShareLink(id, bytes) {
 async function openPublished(id) {
   document.body.classList.add('viewing');
   // The map was sized with the panel and topbar on screen. Hiding them does
-  // not tell Leaflet anything, so without this it keeps painting at the old
+  // not tell MapLibre anything, so without this it keeps painting at the old
   // size — a dead strip on the right, and below the fold on mobile.
   resizeMap();
   status('Loading…');
@@ -2173,7 +2450,7 @@ async function openPublished(id) {
     Object.assign(state.settings, data.settings || {});
 
     refreshAll();
-    fitAll();
+    fitAll({ animate: false });     // a shared link should open already framed
 
     const S = data.stats || {};
     $('#viewer-title').textContent = state.name;
@@ -2247,8 +2524,8 @@ function wire() {
 
   // Transfers
   buildModePicker();
-  $('#btn-draw').onclick = () => drawHandler ? stopDrawing() : startDrawing();
-  map.on(L.Draw.Event.CREATED, onDrawCreated);
+  $('#btn-draw').onclick = () => draw.on ? stopDrawing() : startDrawing();
+  bindDrawing();
   document.addEventListener('keydown', e => { if (e.key === 'Escape') stopDrawing(); });
 
   // Animation
@@ -2344,12 +2621,17 @@ function wire() {
     if (e.key === 'Escape' && !$('#story').hidden) closeStory();
   });
 
-  // Clicking bare map drops the selection. On touch a near-miss is common, so
-  // only treat it as a deselect when the tap was well clear of the chosen ride.
+  // One handler for both selecting a ride and dropping the selection. The
+  // hit box around the pointer is what makes a near-miss on a phone land on
+  // the line, so no separate touch fudge is needed any more.
   map.on('click', (e) => {
-    if (!profile.ride) return;
-    if (COARSE_POINTER && nearRide(e.latlng, profile.ride, HIT_TOLERANCE * 2)) return;
-    showJourneyProfile();
+    if (draw.on) return;
+    const hit = ridesAt(e.point)[0];
+    if (hit) {
+      const ride = state.rides.find(r => r.id === hit.properties.id);
+      if (ride) { showRideProfile(ride); return; }
+    }
+    if (profile.ride) showJourneyProfile();
   });
 
   // Elevation profile
@@ -2389,7 +2671,9 @@ function wire() {
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 (async function boot() {
-  initMap();
+  // Resolves once the map object exists, not once it has drawn: wire() needs
+  // something to bind handlers to, but nothing else should wait on a frame.
+  await initMap();
   wire();
 
   // A ?p= link is somebody else's map: show it read-only and never touch the
@@ -2403,5 +2687,5 @@ function wire() {
 
   await restore();
   refreshAll();
-  if (state.rides.length) fitAll();
+  if (state.rides.length) fitAll({ animate: false });
 })();
